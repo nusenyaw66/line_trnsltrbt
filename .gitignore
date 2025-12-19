@@ -1,0 +1,6 @@
+.DS_Store
+.env
+poetry.lock
+project_note.md
+__pycache__
+

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.line.translator.bot</string>
+    
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/poetry</string>
+        <string>run</string>
+        <string>python</string>
+        <string>/Users/wsun/Programming/line_trnsltrchtbt/line_translator_bot.py</string>
+    </array>
+    
+    <key>WorkingDirectory</key>
+    <string>/Users/wsun/Programming/line_trnsltrchtbt</string>
+    
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PORT</key>
+        <string>8080</string>
+        <key>GOOGLE_APPLICATION_CREDENTIALS</key>
+        <string>/Users/wsun/Programming/line_trnsltrbt/gcp-key.json</string>
+    </dict>
+    
+    <key>RunAtLoad</key>
+    <true/>
+    
+    <key>KeepAlive</key>
+    <true/>
+    
+    <key>StandardOutPath</key>
+    <string>/Users/wsun/Programming/line_trnsltrchtbt/logs/stdout.log</string>
+    
+    <key>StandardErrorPath</key>
+    <string>/Users/wsun/Programming/line_trnsltrchtbt/logs/stderr.log</string>
+</dict>
+</plist>
+

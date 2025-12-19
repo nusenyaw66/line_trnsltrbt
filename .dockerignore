@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# Secrets and Configs
+.env
+*.key
+*.pem
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs and Temp Files
+*.log
+*.pid
+*.cache
+
+# Development and Test
+venv/
+tests/
+*.test
+
+# Docker and Git
+.git/
+.gitignore
+Dockerfile
+
+# Exclude json and vector_store in ./db/ which will be copied to /tmp/ from GCS
+json/
+db/
