@@ -9,7 +9,10 @@ def _get_client() -> translate.Client:
     """
     Always use Application Default Credentials (ADC).
     On Cloud Run, this automatically uses the attached service account.
-    No env vars or keys required in production.
+    For local development, either:
+    1. Use service account key file: Set GOOGLE_APPLICATION_CREDENTIALS env var
+    2. Use ADC with impersonation: Requires 'Service Account Token Creator' role
+    3. Use your own credentials: If you have Cloud Translation API access
     """
     global _client
     if _client is None:
