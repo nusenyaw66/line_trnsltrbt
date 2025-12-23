@@ -71,7 +71,7 @@ fi
 
 # Setup secrets if .env file exists
 SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT}"
-if [ $"secret_update" = true ]; then
+if [ "$secret_update" = true ]; then
     if [ -f .env ]; then
         echo -e "${GREEN}Setting up secrets from .env file...${NC}"
         
