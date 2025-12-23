@@ -1,3 +1,18 @@
+.venv
+__pycache__
+.git
+.gitignore
+.env
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+logs
+*.log
+node_modules
+dist
+build
 # Python
 __pycache__/
 *.pyc
@@ -9,6 +24,7 @@ __pycache__/
 .env
 *.key
 *.pem
+.python-version
 
 # IDE and Editor
 .vscode/

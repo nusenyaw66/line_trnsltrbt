@@ -1,0 +1,61 @@
+options:
+  # Required when using custom service account for Cloud Build
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: asia-east1
+  _SERVICE: line-translator-bot
+  _TAG: v0.1
+  _LINE_ACCESS_TOKEN_SECRET: line-channel-access-token
+  _LINE_SECRET_SECRET: line-channel-secret
+  _SERVICE_ACCOUNT: user-704@line-trnsltrbt.iam.gserviceaccount.com
+
+steps:
+  # Build container
+  # Note: Cloud Build runs on amd64 by default, but we specify platform explicitly
+  # For local builds on macOS (Apple Silicon), use: docker build --platform=linux/amd64
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--platform=linux/amd64"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+      - "."
+
+  # Push to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+
+  # Deploy to Cloud Run
+  # Note: If using secrets, set _USE_SECRETS=true and ensure secrets exist in Secret Manager
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE}"
+      - "--image"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+      - "--region"
+      - "${_REGION}"
+      - "--allow-unauthenticated"
+      - "--port"
+      - "8080"
+      - "--memory"
+      - "512Mi"
+      - "--cpu"
+      - "1"
+      - "--min-instances"
+      - "0"
+      - "--max-instances"
+      - "10"
+      - "--set-secrets"
+      - "LINE_CHANNEL_ACCESS_TOKEN=${_LINE_ACCESS_TOKEN_SECRET}:latest,LINE_CHANNEL_SECRET=${_LINE_SECRET_SECRET}:latest"
+      - "--service-account"
+      - "${_SERVICE_ACCOUNT}"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+
