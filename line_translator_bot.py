@@ -437,7 +437,7 @@ def handle_message(event):
         
         # Only send reply if translation occurred and is different from original
         if translated != user_message and settings["enabled"]:
-            reply_text = f"Original: {user_message}\nTranslated: {translated}"
+            reply_text = f"User ID: {user_id}\nTranslated: {translated}"
             send_reply(event.reply_token, reply_text)
     except Exception as e:
         print(f"ERROR in handle_message: {e}")
