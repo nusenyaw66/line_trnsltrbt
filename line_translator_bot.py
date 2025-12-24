@@ -10,7 +10,8 @@ from linebot.v3.messaging import (
 )
 from linebot.v3.webhooks import (
     MessageEvent,
-    TextMessageContent
+    TextMessageContent,
+    GroupSource
 )
 from dotenv import load_dotenv
 import os
@@ -136,6 +137,74 @@ def update_user_setting(user_id: str, updates: Dict[str, Any]) -> None:
         raise
 
 
+def get_group_setting(group_id: str) -> Dict[str, Any]:
+    """
+    Get group settings from Firestore, returning defaults if not found.
+    
+    Args:
+        group_id: Unique LINE group ID
+    
+    Returns:
+        Group settings dictionary with defaults if not found
+    """
+    try:
+        db = _get_db()
+        # Use "group:{group_id}" as document ID to distinguish from user settings
+        doc_id = f"group:{group_id}"
+        doc_ref = db.collection(_COLLECTION_NAME).document(doc_id)
+        doc = cast(DocumentSnapshot, doc_ref.get())
+        
+        if doc.exists:
+            data = doc.to_dict()
+            default_settings = {
+                "enabled": False,
+                "mode": "pair",
+                "source_lang": None,
+                "target_lang": None
+            }
+            default_settings.update(data or {})
+            return default_settings
+        else:
+            return {
+                "enabled": False,
+                "mode": "pair",
+                "source_lang": None,
+                "target_lang": None
+            }
+    except Exception as e:
+        print(f"ERROR loading group settings from Firestore: {e}")
+        return {
+            "enabled": False,
+            "mode": "pair",
+            "source_lang": None,
+            "target_lang": None
+        }
+
+
+def update_group_setting(group_id: str, updates: Dict[str, Any]) -> None:
+    """
+    Update group settings in Firestore.
+    
+    Args:
+        group_id: Unique LINE group ID
+        updates: Dictionary of settings to update
+    """
+    try:
+        db = _get_db()
+        doc_id = f"group:{group_id}"
+        doc_ref = db.collection(_COLLECTION_NAME).document(doc_id)
+        
+        # Get current settings or use defaults
+        current = get_group_setting(group_id)
+        current.update(updates)
+        
+        # Save to Firestore
+        doc_ref.set(current)
+    except Exception as e:
+        print(f"ERROR saving group settings to Firestore: {e}")
+        raise
+
+
 def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
     """Parse switch command from message. Returns command info or None if not a command."""
     message = message.strip()
@@ -191,16 +260,24 @@ def send_reply(reply_token: str, text: str) -> None:
         print(traceback.format_exc())
 
 
-def handle_on_command(user_id: str, reply_token: str) -> None:
+def handle_on_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /on translate command."""
-    update_user_setting(user_id, {"enabled": True})
-    send_reply(reply_token, "Translation enabled ✓")
+    if group_id:
+        update_group_setting(group_id, {"enabled": True})
+        send_reply(reply_token, "Translation enabled for this group ✓")
+    else:
+        update_user_setting(user_id, {"enabled": True})
+        send_reply(reply_token, "Translation enabled ✓")
 
 
-def handle_off_command(user_id: str, reply_token: str) -> None:
+def handle_off_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /off translate command."""
-    update_user_setting(user_id, {"enabled": False})
-    send_reply(reply_token, "Translation disabled ✓")
+    if group_id:
+        update_group_setting(group_id, {"enabled": False})
+        send_reply(reply_token, "Translation disabled for this group ✓")
+    else:
+        update_user_setting(user_id, {"enabled": False})
+        send_reply(reply_token, "Translation disabled ✓")
 
 
 def normalize_language_code(code: str) -> str:
@@ -221,7 +298,7 @@ def normalize_language_code(code: str) -> str:
     return code_map.get(code_lower, code)  # Return original if not in map
 
 
-def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str) -> None:
+def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /set commands."""
     if cmd_info["type"] == "set_pair":
         source_input = cmd_info["source"]
@@ -246,28 +323,43 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str)
             return
         
         # Use Google Cloud codes directly (now properly normalized)
-        update_user_setting(user_id, {
+        settings_update = {
             "enabled": True,
             "mode": "pair",
             "source_lang": source,
             "target_lang": target
-        })
-        send_reply(reply_token, f"Language pair set: {source} → {target} ✓")
+        }
+        if group_id:
+            update_group_setting(group_id, settings_update)
+            send_reply(reply_token, f"Language pair set for this group: {source} → {target} ✓")
+        else:
+            update_user_setting(user_id, settings_update)
+            send_reply(reply_token, f"Language pair set: {source} → {target} ✓")
     
     elif cmd_info["type"] == "set_american":
-        update_user_setting(user_id, {
+        settings_update = {
             "enabled": True,
             "mode": "american",
             "source_lang": None,
             "target_lang": "en-US"
-        })
-        send_reply(reply_token, "American mode enabled ✓\nAll detected languages will be translated to American English.")
+        }
+        if group_id:
+            update_group_setting(group_id, settings_update)
+            send_reply(reply_token, "American mode enabled for this group ✓\nAll detected languages will be translated to American English.")
+        else:
+            update_user_setting(user_id, settings_update)
+            send_reply(reply_token, "American mode enabled ✓\nAll detected languages will be translated to American English.")
 
 
-def handle_status_command(user_id: str, reply_token: str) -> None:
+def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /status command."""
-    settings = get_user_setting(user_id)
-    status_lines = ["Current Translation Settings:"]
+    if group_id:
+        settings = get_group_setting(group_id)
+        status_lines = ["Current Group Translation Settings:"]
+    else:
+        settings = get_user_setting(user_id)
+        status_lines = ["Current Translation Settings:"]
+    
     status_lines.append(f"Enabled: {'Yes' if settings['enabled'] else 'No'}")
     status_lines.append(f"Mode: {settings['mode']}")
     
@@ -309,21 +401,32 @@ def handle_message(event):
             print(f"Event source type: {type(event.source)}")
             return
         
+        # Check if this is a group chat
+        group_id = None
+        if isinstance(event.source, GroupSource):
+            group_id = event.source.group_id
+            print(f"Message received in group: {group_id} from user: {user_id}")
+        
         # Check if message is a switch command
         cmd_info = parse_switch_command(user_message)
         if cmd_info:
             if cmd_info["type"] == "on":
-                handle_on_command(user_id, event.reply_token)
+                handle_on_command(user_id, event.reply_token, group_id)
             elif cmd_info["type"] == "off":
-                handle_off_command(user_id, event.reply_token)
+                handle_off_command(user_id, event.reply_token, group_id)
             elif cmd_info["type"] in ["set_pair", "set_american"]:
-                handle_set_command(cmd_info, user_id, event.reply_token)
+                handle_set_command(cmd_info, user_id, event.reply_token, group_id)
             elif cmd_info["type"] == "status":
-                handle_status_command(user_id, event.reply_token)
+                handle_status_command(user_id, event.reply_token, group_id)
             return
         
-        # Not a command, apply translation based on user settings
-        settings = get_user_setting(user_id)
+        # Not a command, apply translation based on settings
+        # In group chats, use group settings; otherwise use user settings
+        if group_id:
+            settings = get_group_setting(group_id)
+        else:
+            settings = get_user_setting(user_id)
+        
         translated = detect_and_translate(
             user_message,
             enabled=settings["enabled"],
