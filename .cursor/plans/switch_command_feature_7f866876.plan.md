@@ -102,5 +102,3 @@ flowchart TD
 - Invalid language codes → reply with error message and supported languages
 - Malformed commands → reply with usage instructions
 - JSON file read/write errors → log and continue with default settings
-
-## File Changes Summary

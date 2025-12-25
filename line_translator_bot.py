@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 import os
 import traceback
 import json
+import urllib.request
+import urllib.error
 from typing import Dict, Any, Optional, cast
 from google.cloud.firestore_v1 import Client
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
@@ -242,6 +244,36 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def get_user_display_name(user_id: str) -> Optional[str]:
+    """
+    Get user's display name from LINE API.
+    
+    Returns None if profile cannot be retrieved (user not added as friend,
+    user blocked the bot, or API error).
+    """
+    if not CHANNEL_ACCESS_TOKEN:
+        return None
+    
+    try:
+        url = f"https://api.line.me/v2/bot/profile/{user_id}"
+        headers = {
+            "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"
+        }
+        
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req) as response:
+            if response.status == 200:
+                profile_data = json.loads(response.read().decode())
+                return profile_data.get("displayName")
+    except urllib.error.HTTPError as e:
+        # User might not have added bot as friend, or blocked the bot
+        print(f"Could not retrieve profile for user {user_id}: {e.code} {e.reason}")
+    except Exception as e:
+        print(f"ERROR retrieving user profile: {e}")
+    
+    return None
+
+
 def send_reply(reply_token: str, text: str) -> None:
     """Send reply message to user."""
     try:
@@ -437,7 +469,10 @@ def handle_message(event):
         
         # Only send reply if translation occurred and is different from original
         if translated != user_message and settings["enabled"]:
-            reply_text = f"User ID: {user_id}\nTranslated: {translated}"
+            # Try to get user's display name, fallback to user ID if unavailable
+            display_name = get_user_display_name(user_id)
+            user_identifier = display_name if display_name else f"User ID: {user_id}"
+            reply_text = f"{user_identifier}\nTranslated: {translated}"
             send_reply(event.reply_token, reply_text)
     except Exception as e:
         print(f"ERROR in handle_message: {e}")

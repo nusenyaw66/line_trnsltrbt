@@ -5,7 +5,7 @@ options:
 substitutions:
   _REGION: asia-east1
   _SERVICE: line-translator-bot
-  _TAG: v0.1
+  _TAG: v0.2
   _LINE_ACCESS_TOKEN_SECRET: line-channel-access-token
   _LINE_SECRET_SECRET: line-channel-secret
   _SERVICE_ACCOUNT: user-704@line-trnsltrbt.iam.gserviceaccount.com

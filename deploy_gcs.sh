@@ -52,7 +52,7 @@ gcloud services enable cloudbuild.googleapis.com \
     artifactregistry.googleapis.com \
     secretmanager.googleapis.com \
     translate.googleapis.com \
-    --project="$PROJECT_ID" 2>/dev/null || true
+    --project="$PROJECT_ID" 2>/dev/null || trueline-bty-chtbot-bucket
 
 # Create Artifact Registry repository if it doesn't exist
 echo -e "${GREEN}Checking Artifact Registry repository...${NC}"
