@@ -11,6 +11,7 @@ from linebot.v3.messaging import (
 from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent,
+    AudioMessageContent,
     GroupSource
 )
 from dotenv import load_dotenv
@@ -24,6 +25,7 @@ from google.cloud.firestore_v1 import Client
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
 
 from gcs_translate import detect_and_translate
+from gcs_audio import speech_to_text, download_line_audio
 
 load_dotenv()
 CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
@@ -280,17 +282,53 @@ def send_reply(reply_token: str, text: str) -> None:
         with ApiClient(configuration) as api_client:
             line_bot_api = MessagingApi(api_client)
             # LINE Bot SDK v3 uses replyToken (camelCase) in the API
+            # quickReply and quoteToken are optional parameters
             request = ReplyMessageRequest(
                 replyToken=reply_token,  # type: ignore
-                messages=[TextMessage(text=text)],
-                quickReply=None,  # type: ignore
-                quoteToken=None  # type: ignore
+                messages=[TextMessage(text=text)],  # type: ignore
+                **{"quickReply": None, "quoteToken": None}  # type: ignore
             )
             line_bot_api.reply_message(request)
     except Exception as e:
         print(f"ERROR sending reply: {e}")
         print(traceback.format_exc())
 
+
+def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
+    """
+    Check if voice translation is enabled for the given settings.
+    
+    Voice translation is enabled when:
+    - Translation is enabled
+    - Mode is "pair"
+    - Language pair is "en" and "id" (in either direction)
+    
+    Args:
+        settings: User or group settings dictionary
+    
+    Returns:
+        True if voice translation should be enabled
+    """
+    if not settings.get("enabled", False):
+        return False
+    
+    if settings.get("mode") != "pair":
+        return False
+    
+    source_lang = settings.get("source_lang")
+    target_lang = settings.get("target_lang")
+    
+    # Check if language pair is en-id or id-en
+    if source_lang == "en" and target_lang == "id":
+        return True
+    if source_lang == "id" and target_lang == "en":
+        return True
+    
+    return False
+
+
+# Audio upload functions removed - no longer needed
+# Voice translation now sends text messages instead of audio messages
 
 def handle_on_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /on translate command."""
@@ -477,6 +515,186 @@ def handle_message(event):
     except Exception as e:
         print(f"ERROR in handle_message: {e}")
         print(traceback.format_exc())
+
+
+@handler.add(MessageEvent, message=AudioMessageContent)
+def handle_audio_message(event):
+    """
+    Handle audio/voice messages for voice translation.
+    Only processes when:
+    - Translation is enabled
+    - Mode is "pair"
+    - Language pair is "en id" or "id en"
+    """
+    try:
+        user_id = event.source.user_id if hasattr(event.source, 'user_id') else None
+        
+        if not user_id:
+            print("WARNING: Could not extract user_id from audio event")
+            return
+        
+        # Check if this is a group chat
+        group_id = None
+        if isinstance(event.source, GroupSource):
+            group_id = event.source.group_id
+            print(f"Audio message received in group: {group_id} from user: {user_id}")
+        
+        # Get user/group settings
+        if group_id:
+            settings = get_group_setting(group_id)
+        else:
+            settings = get_user_setting(user_id)
+        
+        # Check if voice translation is enabled
+        if not is_voice_translation_enabled(settings):
+            # Voice translation not enabled, send informative message
+            send_reply(
+                event.reply_token,
+                "Voice translation is only available for English-Indonesian language pairs.\n"
+                "Please set language pair to 'en id' or 'id en' using:\n"
+                "/set language pair en id"
+            )
+            return
+        
+        # Get audio message ID
+        message_id = event.message.id
+        
+        if not CHANNEL_ACCESS_TOKEN:
+            send_reply(event.reply_token, "Error: Channel access token not configured.")
+            return
+        
+        # Download audio from LINE
+        try:
+            audio_content = download_line_audio(message_id, CHANNEL_ACCESS_TOKEN)
+        except Exception as e:
+            print(f"ERROR downloading audio: {e}")
+            send_reply(event.reply_token, "Could not download audio. Please try again.")
+            return
+        
+        # Determine source and target languages
+        source_lang = settings.get("source_lang")
+        target_lang = settings.get("target_lang")
+        
+        # Validate that languages are set
+        if not source_lang or not target_lang:
+            send_reply(event.reply_token, "Error: Language pair not properly configured.")
+            return
+        
+        # Map to Speech-to-Text language codes
+        stt_language_map = {
+            "en": "en-US",
+            "id": "id-ID"
+        }
+        
+        # Try both languages for speech recognition (since we don't know which one was spoken)
+        # First try source language, then target language
+        source_stt_code = stt_language_map.get(source_lang, "en-US")
+        target_stt_code = stt_language_map.get(target_lang, "id-ID")
+        
+        transcribed_text = None
+        detected_language = None
+        recognition_errors = []
+        
+        # Try source language first
+        try:
+            print(f"Attempting speech recognition with {source_lang} ({source_stt_code})...")
+            transcribed_text = speech_to_text(audio_content, source_stt_code)
+            if transcribed_text and transcribed_text.strip():
+                detected_language = source_lang
+                print(f"✓ Speech recognized in {source_lang}: {transcribed_text}")
+            else:
+                raise Exception("Recognition returned empty transcript")
+        except Exception as e:
+            error_msg = f"Recognition failed for {source_lang}: {str(e)}"
+            print(error_msg)
+            recognition_errors.append(error_msg)
+            transcribed_text = None
+        
+        # If source language failed, try target language
+        if not transcribed_text:
+            try:
+                print(f"Attempting speech recognition with {target_lang} ({target_stt_code})...")
+                transcribed_text = speech_to_text(audio_content, target_stt_code)
+                if transcribed_text and transcribed_text.strip():
+                    detected_language = target_lang
+                    print(f"✓ Speech recognized in {target_lang}: {transcribed_text}")
+                else:
+                    raise Exception("Recognition returned empty transcript")
+            except Exception as e2:
+                error_msg = f"Recognition failed for {target_lang}: {str(e2)}"
+                print(error_msg)
+                recognition_errors.append(error_msg)
+        
+        # If both attempts failed, send error message
+        if not transcribed_text or not transcribed_text.strip():
+            error_details = "\n".join(recognition_errors) if recognition_errors else "Unknown error"
+            print(f"All speech recognition attempts failed. Errors: {error_details}")
+            send_reply(
+                event.reply_token,
+                "Could not recognize speech. Please ensure:\n"
+                "- Audio is clear and not too quiet\n"
+                "- You're speaking in English or Indonesian\n"
+                "- Try speaking more slowly or clearly"
+            )
+            return
+        
+        if not transcribed_text or not transcribed_text.strip():
+            send_reply(event.reply_token, "Could not transcribe audio. Please try again with clearer audio.")
+            return
+        
+        # Translate the transcribed text
+        try:
+            # Determine target language for translation
+            if detected_language == source_lang:
+                translation_target = target_lang
+            else:
+                translation_target = source_lang
+            
+            translated_text = detect_and_translate(
+                transcribed_text,
+                enabled=True,
+                source_lang=detected_language,
+                target_lang=translation_target,
+                mode="pair"
+            )
+            
+            print(f"Translated: {transcribed_text} -> {translated_text}")
+            
+        except Exception as e:
+            print(f"ERROR translating text: {e}")
+            # Fallback: send transcribed text
+            send_reply(
+                event.reply_token,
+                f"Transcribed: {transcribed_text}\n(Translation failed)"
+            )
+            return
+        
+        # Send translated text as text message (no audio generation)
+        try:
+            # Format the response with original and translated text
+            reply_text = f"Translated: {translated_text}"
+            send_reply(event.reply_token, reply_text)
+            
+            print(f"Voice translation completed: {detected_language} -> {translation_target}")
+            print(f"Original: {transcribed_text}")
+            print(f"Translated: {translated_text}")
+            
+        except Exception as e:
+            print(f"ERROR sending reply: {e}")
+            print(traceback.format_exc())
+            # Try to send a simpler message
+            try:
+                send_reply(event.reply_token, translated_text)
+            except:
+                pass  # If we can't send reply, just log the error
+            
+    except Exception as e:
+        print(f"ERROR in handle_audio_message: {e}")
+        print(traceback.format_exc())
+        try:
+            send_reply(event.reply_token, "An error occurred processing the audio message. Please try again.")
+        except:
+            pass  # If we can't send reply, just log the error
 
 if __name__ == "__main__":
     port = int(os.environ.get('PORT', 8080))

@@ -4,7 +4,7 @@
 
 set -e
 
-# flag for Secrets update - false to skip update
+# WSX: Flag for Secrets update - false to skip update
 secret_update=false
 
 # Configuration (override with environment variables)
@@ -52,7 +52,10 @@ gcloud services enable cloudbuild.googleapis.com \
     artifactregistry.googleapis.com \
     secretmanager.googleapis.com \
     translate.googleapis.com \
-    --project="$PROJECT_ID" 2>/dev/null || trueline-bty-chtbot-bucket
+    storage.googleapis.com \
+    speech.googleapis.com \
+    texttospeech.googleapis.com \
+    --project="$PROJECT_ID" 2>/dev/null || true
 
 # Create Artifact Registry repository if it doesn't exist
 echo -e "${GREEN}Checking Artifact Registry repository...${NC}"
@@ -176,8 +179,25 @@ gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
     --role="roles/iam.serviceAccountUser" \
     --project="$PROJECT_ID" 2>/dev/null || true
 
+# Grant Cloud Run service account permissions for Speech-to-Text and Text-to-Speech APIs
+echo -e "${GREEN}Granting Cloud Run service account API permissions...${NC}"
+echo "Service account: ${SERVICE_ACCOUNT}"
+
+# Allow service account to use Speech-to-Text API
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/speech.client" \
+    --project="$PROJECT_ID" 2>/dev/null || true
+
+# Allow service account to use Text-to-Speech API
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/cloudtts.user" \
+    --project="$PROJECT_ID" 2>/dev/null || true
+
 # Generate tag with timestamp
-TAG="v$(date +%Y%m%d-%H%M%S)"
+# TAG="v$(date +%Y%m%d-%H%M%S)"
+TAG="v0.0.4"
 
 echo -e "${GREEN}Starting Cloud Build deployment...${NC}"
 echo -e "${YELLOW}Tag: $TAG${NC}"

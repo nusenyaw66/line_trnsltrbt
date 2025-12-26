@@ -1,18 +1,31 @@
-bueaty RAG chatbot for Line
+TranslatorBot for Line
 
-qa_chatbot.py
-Q&A RAG chatbot via OpenAI API
+v0.0.1
+Command Parsing:
+Commands start with /
+/on translate - enables translation for user
+/off translate - disables translation for user
+/set language pair <source> <target> - sets specific language pair (e.g., /set language pair tc eng)
+/set american - sets mode to translate all languages to American English
+/status - returns current user settings
 
-qa_chatbot_local_llm.py
-Q&A RAG chatbot via local LLM in "./Programming/local_llm/llm_name"
+Langage options for /set language pair <source> <target>
+"en": "en",
+"zh-tw": "zh-TW",
+"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)
+"es": "es",
+"ja": "ja",
+"jpn": "ja",  # Also accept jpn
+"th": "th",
+"id": "id",
+"ind": "id"  # Also accept ind
 
-qa_lms_chatbot.py
-Q&A RAG chatbot via LMStudio LLM
+v0.0.2
+in /set language pair mode, added translation from soruce to target and vice versa.  Also Line user name (when available) will be displayed with Original message
 
-v0.1.1
-changed to JSON input format
-changed to HuggingFace "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2" for better Trad. Chinese
-changed to "claude-3-5-sonnet-20241022" for better Trad. Chinese query
+v0.0.3
+added voice-to-text and text-to-voice for language pair en and id
 
-v0.1.2 changed to lazy calling for qa_chatbot.py
-v0.1.3 changed to lazy calling for Line API initialization 
+v0.0.4
+changed only voice-to-text. I.e., souce voice will only be translated to text instead of voice.
+
