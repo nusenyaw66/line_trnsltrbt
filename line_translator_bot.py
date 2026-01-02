@@ -20,6 +20,7 @@ import traceback
 import json
 import urllib.request
 import urllib.error
+import re
 from typing import Dict, Any, Optional, cast
 from google.cloud.firestore_v1 import Client
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
@@ -443,6 +444,44 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
     
     send_reply(reply_token, "\n".join(status_lines))
 
+
+def is_emoji_only(message: str) -> bool:
+    """
+    Check if message contains only emojis/LINE icons (no regular text).
+    
+    Args:
+        message: The message text to check
+    
+    Returns:
+        True if message contains only emojis/icons, False otherwise
+    """
+    # Remove whitespace
+    stripped = message.strip()
+    
+    # Empty message is considered emoji-only
+    if not stripped:
+        return True
+    
+    # Regex pattern for emoji Unicode ranges
+    # This covers most emoji ranges including:
+    # - Emoticons and symbols
+    # - Miscellaneous symbols and pictographs
+    # - Supplemental symbols and pictographs
+    # - Symbols and pictographs extended-A
+    # - Skin tone modifiers
+    # - Variation selectors
+    # - Zero-width joiner (for composite emojis)
+    emoji_pattern = re.compile(
+        r'^[\U0001F300-\U0001F9FF\U00002600-\U000026FF\U00002700-\U000027BF'
+        r'\U0001F600-\U0001F64F\U0001F680-\U0001F6FF\U0001F1E0-\U0001F1FF'
+        r'\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U0000200D'
+        r'\U0000FE00-\U0000FE0F\U0001F3FB-\U0001F3FF\U000020E3\s]*$',
+        re.UNICODE
+    )
+    
+    # Check if the entire message matches emoji pattern
+    return bool(emoji_pattern.match(stripped))
+
 @app.route("/webhook", methods=['POST'])
 def webhook():
     signature = request.headers.get('X-Line-Signature', '')
@@ -488,6 +527,11 @@ def handle_message(event):
                 handle_set_command(cmd_info, user_id, event.reply_token, group_id)
             elif cmd_info["type"] == "status":
                 handle_status_command(user_id, event.reply_token, group_id)
+            return
+        
+        # Skip translation if message contains only emojis/LINE icons
+        if is_emoji_only(user_message):
+            print(f"Skipping translation for emoji-only message from user {user_id}")
             return
         
         # Not a command, apply translation based on settings
