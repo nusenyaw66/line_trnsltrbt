@@ -29,3 +29,5 @@ added voice-to-text and text-to-voice for language pair en and id
 v0.0.4
 changed only voice-to-text. I.e., souce voice will only be translated to text instead of voice.
 
+v0.0.5
+ignore icon or Emoji only messages
