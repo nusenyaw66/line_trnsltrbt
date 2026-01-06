@@ -9,6 +9,7 @@ substitutions:
   _LINE_ACCESS_TOKEN_SECRET: line-channel-access-token
   _LINE_SECRET_SECRET: line-channel-secret
   _SERVICE_ACCOUNT: user-704@line-trnsltrbt.iam.gserviceaccount.com
+  _APP_VERSION: unknown
 
 steps:
   # Build container
@@ -53,6 +54,8 @@ steps:
       - "10"
       - "--set-secrets"
       - "LINE_CHANNEL_ACCESS_TOKEN=${_LINE_ACCESS_TOKEN_SECRET}:latest,LINE_CHANNEL_SECRET=${_LINE_SECRET_SECRET}:latest"
+      - "--set-env-vars"
+      - "APP_VERSION=${_APP_VERSION}"
       - "--service-account"
       - "${_SERVICE_ACCOUNT}"
 

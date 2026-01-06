@@ -72,23 +72,53 @@ else
     echo -e "${GREEN}Artifact Registry repository already exists${NC}"
 fi
 
+# Read APP_VERSION from .env file (always, not just when updating secrets)
+APP_VERSION=""
+if [ -f .env ]; then
+    # Source .env file to get APP_VERSION
+    set -a
+    source .env 2>/dev/null || {
+        # Fallback: parse line by line
+        while IFS= read -r line || [ -n "$line" ]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "$line" ]] && continue
+            [[ "$line" =~ = ]] && export "$line"
+        done < .env
+    }
+    set +a
+    
+    # Extract APP_VERSION if it exists
+    if [ -n "${APP_VERSION:-}" ]; then
+        echo -e "${GREEN}Found APP_VERSION in .env: ${APP_VERSION}${NC}"
+    else
+        echo -e "${YELLOW}Warning: APP_VERSION not found in .env, using default${NC}"
+        APP_VERSION="unknown"
+    fi
+else
+    echo -e "${YELLOW}Warning: .env file not found, APP_VERSION will be 'unknown'${NC}"
+    APP_VERSION="unknown"
+fi
+
 # Setup secrets if .env file exists
 SERVICE_ACCOUNT_EMAIL="${SERVICE_ACCOUNT}"
 if [ "$secret_update" = true ]; then
     if [ -f .env ]; then
         echo -e "${GREEN}Setting up secrets from .env file...${NC}"
         
-        # Source .env file
-        set -a
-        source .env 2>/dev/null || {
-            # Fallback: parse line by line
-            while IFS= read -r line || [ -n "$line" ]; do
-                [[ "$line" =~ ^[[:space:]]*# ]] && continue
-                [[ -z "$line" ]] && continue
-                [[ "$line" =~ = ]] && export "$line"
-            done < .env
-        }
-        set +a
+        # Variables from .env should already be available from above, but ensure they're set
+        # (in case secret_update=true but .env wasn't read above)
+        if [ -z "${LINE_CHANNEL_ACCESS_TOKEN:-}" ] && [ -z "${LINE_CHANNEL_SECRET:-}" ]; then
+            set -a
+            source .env 2>/dev/null || {
+                # Fallback: parse line by line
+                while IFS= read -r line || [ -n "$line" ]; do
+                    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                    [[ -z "$line" ]] && continue
+                    [[ "$line" =~ = ]] && export "$line"
+                done < .env
+            }
+            set +a
+        fi
         
         # Create or update LINE_CHANNEL_ACCESS_TOKEN secret
         if [ -n "$LINE_CHANNEL_ACCESS_TOKEN" ]; then
@@ -106,10 +136,21 @@ if [ "$secret_update" = true ]; then
             fi
             
             # Grant Cloud Run service account access to the secret
-            gcloud secrets add-iam-policy-binding "$SECRET_ACCESS_TOKEN" \
-                --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-                --role="roles/secretmanager.secretAccessor" \
-                --project="$PROJECT_ID" 2>/dev/null || true
+            if gcloud secrets get-iam-policy "$SECRET_ACCESS_TOKEN" \
+                --flatten="bindings[].members" \
+                --filter="bindings.members:serviceAccount:${SERVICE_ACCOUNT_EMAIL} AND bindings.role:roles/secretmanager.secretAccessor" \
+                --format="value(bindings.role)" \
+                --project="$PROJECT_ID" 2>/dev/null | grep -q "^roles/secretmanager.secretAccessor$"; then
+                echo -e "${GREEN}Secret access already granted: $SECRET_ACCESS_TOKEN${NC}"
+            else
+                echo -e "${YELLOW}Granting secret access: $SECRET_ACCESS_TOKEN${NC}"
+                gcloud secrets add-iam-policy-binding "$SECRET_ACCESS_TOKEN" \
+                    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+                    --role="roles/secretmanager.secretAccessor" \
+                    --project="$PROJECT_ID" 2>/dev/null || {
+                    echo -e "${RED}Failed to grant secret access: $SECRET_ACCESS_TOKEN${NC}"
+                }
+            fi
         else
             echo -e "${YELLOW}Warning: LINE_CHANNEL_ACCESS_TOKEN not found in .env${NC}"
         fi
@@ -130,10 +171,21 @@ if [ "$secret_update" = true ]; then
             fi
             
             # Grant Cloud Run service account access to the secret
-            gcloud secrets add-iam-policy-binding "$SECRET_CHANNEL_SECRET" \
-                --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
-                --role="roles/secretmanager.secretAccessor" \
-                --project="$PROJECT_ID" 2>/dev/null || true
+            if gcloud secrets get-iam-policy "$SECRET_CHANNEL_SECRET" \
+                --flatten="bindings[].members" \
+                --filter="bindings.members:serviceAccount:${SERVICE_ACCOUNT_EMAIL} AND bindings.role:roles/secretmanager.secretAccessor" \
+                --format="value(bindings.role)" \
+                --project="$PROJECT_ID" 2>/dev/null | grep -q "^roles/secretmanager.secretAccessor$"; then
+                echo -e "${GREEN}Secret access already granted: $SECRET_CHANNEL_SECRET${NC}"
+            else
+                echo -e "${YELLOW}Granting secret access: $SECRET_CHANNEL_SECRET${NC}"
+                gcloud secrets add-iam-policy-binding "$SECRET_CHANNEL_SECRET" \
+                    --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
+                    --role="roles/secretmanager.secretAccessor" \
+                    --project="$PROJECT_ID" 2>/dev/null || {
+                    echo -e "${RED}Failed to grant secret access: $SECRET_CHANNEL_SECRET${NC}"
+                }
+            fi
         else
             echo -e "${YELLOW}Warning: LINE_CHANNEL_SECRET not found in .env${NC}"
         fi
@@ -147,57 +199,133 @@ if [ "$secret_update" = true ]; then
     echo -e "${GREEN}Skipping secrets update.${NC}"
  fi   
 
+# Helper function to check if a project-level IAM binding already exists
+check_and_grant_project_iam() {
+    local member="$1"
+    local role="$2"
+    local description="$3"
+    
+    # Check if the binding already exists
+    if gcloud projects get-iam-policy "$PROJECT_ID" \
+        --flatten="bindings[].members" \
+        --filter="bindings.members:${member} AND bindings.role:${role}" \
+        --format="value(bindings.role)" \
+        --project="$PROJECT_ID" 2>/dev/null | grep -q "^${role}$"; then
+        echo -e "${GREEN}Permission already granted: ${description}${NC}"
+        return 0
+    fi
+    
+    # Grant the permission if it doesn't exist
+    echo -e "${YELLOW}Granting permission: ${description}${NC}"
+    if gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+        --member="${member}" \
+        --role="${role}" \
+        --project="$PROJECT_ID"; then
+        echo -e "${GREEN}Successfully granted permission: ${description}${NC}"
+        return 0
+    else
+        local exit_code=$?
+        echo -e "${RED}Failed to grant permission: ${description}${NC}"
+        echo -e "${RED}Member: ${member}, Role: ${role}${NC}"
+        # Don't fail the script - permission might already exist or there might be a transient issue
+        return $exit_code
+    fi
+}
+
+# Helper function to check if a service account IAM binding already exists
+check_and_grant_service_account_iam() {
+    local sa_email="$1"
+    local member="$2"
+    local role="$3"
+    local description="$4"
+    
+    # Check if the binding already exists
+    if gcloud iam service-accounts get-iam-policy "$sa_email" \
+        --flatten="bindings[].members" \
+        --filter="bindings.members:${member} AND bindings.role:${role}" \
+        --format="value(bindings.role)" \
+        --project="$PROJECT_ID" 2>/dev/null | grep -q "^${role}$"; then
+        echo -e "${GREEN}Permission already granted: ${description}${NC}"
+        return 0
+    fi
+    
+    # Grant the permission if it doesn't exist
+    echo -e "${YELLOW}Granting permission: ${description}${NC}"
+    gcloud iam service-accounts add-iam-policy-binding "$sa_email" \
+        --member="${member}" \
+        --role="${role}" \
+        --project="$PROJECT_ID" 2>/dev/null || {
+        echo -e "${RED}Failed to grant permission: ${description}${NC}"
+        return 1
+    }
+    return 0
+}
+
 # Grant Cloud Build service account necessary permissions
 # Using the project service account for Cloud Build operations
 CLOUDBUILD_SA="$SERVICE_ACCOUNT"
 # Convert email format to full resource name format for gcloud builds submit
 CLOUDBUILD_SA_FULL="projects/${PROJECT_ID}/serviceAccounts/${CLOUDBUILD_SA}"
 
-echo -e "${GREEN}Granting Cloud Build service account permissions...${NC}"
+echo -e "${GREEN}Checking Cloud Build service account permissions...${NC}"
 echo "Using service account: ${CLOUDBUILD_SA}"
 
 # Allow Cloud Build to write to GCS (for source code storage bucket)
 # Cloud Build automatically creates {PROJECT_ID}_cloudbuild bucket
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${CLOUDBUILD_SA}" \
-    --role="roles/storage.admin" 2>/dev/null || true
+check_and_grant_project_iam \
+    "serviceAccount:${CLOUDBUILD_SA}" \
+    "roles/storage.admin" \
+    "Cloud Build - Storage Admin"
 
 # Allow Cloud Build to push to Artifact Registry
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${CLOUDBUILD_SA}" \
-    --role="roles/artifactregistry.writer" 2>/dev/null || true
+check_and_grant_project_iam \
+    "serviceAccount:${CLOUDBUILD_SA}" \
+    "roles/artifactregistry.writer" \
+    "Cloud Build - Artifact Registry Writer"
 
 # Allow Cloud Build to deploy to Cloud Run
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${CLOUDBUILD_SA}" \
-    --role="roles/run.admin" 2>/dev/null || true
+check_and_grant_project_iam \
+    "serviceAccount:${CLOUDBUILD_SA}" \
+    "roles/run.admin" \
+    "Cloud Build - Cloud Run Admin"
 
 # Allow Cloud Build to act as the service account (impersonation for Cloud Run deployment)
 # Note: This allows the service account to impersonate itself (may not be needed, but harmless)
-gcloud iam service-accounts add-iam-policy-binding "$SERVICE_ACCOUNT" \
-    --member="serviceAccount:${CLOUDBUILD_SA}" \
-    --role="roles/iam.serviceAccountUser" \
-    --project="$PROJECT_ID" 2>/dev/null || true
+check_and_grant_service_account_iam \
+    "$SERVICE_ACCOUNT" \
+    "serviceAccount:${CLOUDBUILD_SA}" \
+    "roles/iam.serviceAccountUser" \
+    "Cloud Build - Service Account User"
 
 # Grant Cloud Run service account permissions for Speech-to-Text and Text-to-Speech APIs
-echo -e "${GREEN}Granting Cloud Run service account API permissions...${NC}"
+echo -e "${GREEN}Checking Cloud Run service account API permissions...${NC}"
 echo "Service account: ${SERVICE_ACCOUNT}"
 
 # Allow service account to use Speech-to-Text API
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${SERVICE_ACCOUNT}" \
-    --role="roles/speech.client" \
-    --project="$PROJECT_ID" 2>/dev/null || true
+check_and_grant_project_iam \
+    "serviceAccount:${SERVICE_ACCOUNT}" \
+    "roles/speech.client" \
+    "Cloud Run - Speech-to-Text API"
 
 # Allow service account to use Text-to-Speech API
-gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${SERVICE_ACCOUNT}" \
-    --role="roles/cloudtts.user" \
-    --project="$PROJECT_ID" 2>/dev/null || true
+# Note: There is no predefined IAM role for Text-to-Speech API at the project level.
+# Permissions are typically handled automatically when the API is enabled (which we do above).
+# The service account will have access to the API when making requests.
+# echo -e "${GREEN}Text-to-Speech API permissions handled via API enablement (no explicit IAM role needed)${NC}"
 
-# Generate tag with timestamp
-# TAG="v$(date +%Y%m%d-%H%M%S)"
-TAG="v0.0.4"
+# Generate tag from APP_VERSION (read from .env file)
+if [ -n "${APP_VERSION:-}" ] && [ "${APP_VERSION}" != "unknown" ]; then
+    # Use APP_VERSION, add 'v' prefix if not already present
+    if [[ "$APP_VERSION" =~ ^v ]]; then
+        TAG="$APP_VERSION"
+    else
+        TAG="v${APP_VERSION}"
+    fi
+else
+    # Fallback to timestamp if APP_VERSION is not set or is "unknown"
+    echo -e "${YELLOW}Warning: APP_VERSION not available, using timestamp for tag${NC}"
+    TAG="v$(date +%Y%m%d-%H%M%S)"
+fi
 
 echo -e "${GREEN}Starting Cloud Build deployment...${NC}"
 echo -e "${YELLOW}Tag: $TAG${NC}"
@@ -209,7 +337,7 @@ echo -e "${GREEN}Submitting Cloud Build with service account: ${CLOUDBUILD_SA}${
 gcloud builds submit \
     --config cloudbuild.yaml \
     --service-account="${CLOUDBUILD_SA_FULL}" \
-    --substitutions=_REGION="$REGION",_SERVICE="$SERVICE_NAME",_TAG="$TAG",_LINE_ACCESS_TOKEN_SECRET="$SECRET_ACCESS_TOKEN",_LINE_SECRET_SECRET="$SECRET_CHANNEL_SECRET",_SERVICE_ACCOUNT="$SERVICE_ACCOUNT" \
+    --substitutions=_REGION="$REGION",_SERVICE="$SERVICE_NAME",_TAG="$TAG",_LINE_ACCESS_TOKEN_SECRET="$SECRET_ACCESS_TOKEN",_LINE_SECRET_SECRET="$SECRET_CHANNEL_SECRET",_SERVICE_ACCOUNT="$SERVICE_ACCOUNT",_APP_VERSION="$APP_VERSION" \
     --project="$PROJECT_ID"
 
 echo ""

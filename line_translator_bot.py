@@ -12,6 +12,7 @@ from linebot.v3.webhooks import (
     MessageEvent,
     TextMessageContent,
     AudioMessageContent,
+    StickerMessageContent,
     GroupSource
 )
 from dotenv import load_dotenv
@@ -31,6 +32,7 @@ from gcs_audio import speech_to_text, download_line_audio
 load_dotenv()
 CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+APP_VERSION = os.getenv('APP_VERSION', 'unknown')
 
 app = Flask(__name__)
 
@@ -222,57 +224,115 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
     
     command = parts[0]
     
-    # /on translate
-    if command == '/on' and len(parts) >= 2 and parts[1] == 'translate':
-        return {"type": "on"}
-    
-    # /off translate
-    if command == '/off' and len(parts) >= 2 and parts[1] == 'translate':
-        return {"type": "off"}
-    
-    # /set language pair <source> <target>
-    if command == '/set' and len(parts) >= 5 and parts[1] == 'language' and parts[2] == 'pair':
-        source = parts[3]
-        target = parts[4]
-        return {"type": "set_pair", "source": source, "target": target}
-    
-    # /set american
-    if command == '/set' and len(parts) >= 2 and parts[1] == 'american':
-        return {"type": "set_american"}
+    # /set commands - check these first before other /set commands
+    if command == '/set' and len(parts) >= 2:
+        # /set on
+        if parts[1] == 'on':
+            return {"type": "set_on"}
+        # /set off
+        elif parts[1] == 'off':
+            return {"type": "set_off"}
+        # /set language pair <source> <target>
+        elif len(parts) >= 5 and parts[1] == 'language' and parts[2] == 'pair':
+            source = parts[3]
+            target = parts[4]
+            return {"type": "set_pair", "source": source, "target": target}
+        # /set american
+        elif parts[1] == 'american':
+            return {"type": "set_american"}
     
     # /status
     if command == '/status':
+        if len(parts) >= 2 and parts[1] == 'version':
+            return {"type": "status_version"}
+        elif len(parts) >= 2 and parts[1] == 'help':
+            return {"type": "status_help"}
         return {"type": "status"}
     
     return None
 
 
-def get_user_display_name(user_id: str) -> Optional[str]:
+def get_user_display_name(user_id: str, group_id: Optional[str] = None) -> Optional[str]:
     """
     Get user's display name from LINE API.
     
+    For group chats, uses the group member profile endpoint.
+    For individual chats, uses the user profile endpoint.
+    
     Returns None if profile cannot be retrieved (user not added as friend,
     user blocked the bot, or API error).
+    
+    Args:
+        user_id: Unique LINE user ID
+        group_id: Optional group ID for group chat contexts
+    
+    Returns:
+        User's display name or None if unavailable
     """
     if not CHANNEL_ACCESS_TOKEN:
+        print("ERROR: CHANNEL_ACCESS_TOKEN not set, cannot retrieve profile")
         return None
     
-    try:
+    # Determine context and URL before try block to avoid unbound variable errors
+    if group_id:
+        # Group chat: use group member profile endpoint
+        url = f"https://api.line.me/v2/bot/group/{group_id}/member/{user_id}"
+        context = f"group {group_id}"
+    else:
+        # Individual chat: use user profile endpoint
         url = f"https://api.line.me/v2/bot/profile/{user_id}"
+        context = "individual chat"
+    
+    try:
+        
         headers = {
-            "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}"
+            "Authorization": f"Bearer {CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
         }
         
         req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req) as response:
+        with urllib.request.urlopen(req, timeout=10) as response:
             if response.status == 200:
                 profile_data = json.loads(response.read().decode())
-                return profile_data.get("displayName")
+                display_name = profile_data.get("displayName")
+                if display_name:
+                    print(f"✓ Retrieved display name '{display_name}' for user {user_id} in {context}")
+                return display_name
+            else:
+                print(f"WARNING: Unexpected status {response.status} when retrieving profile for user {user_id} in {context}")
+                return None
+                
     except urllib.error.HTTPError as e:
-        # User might not have added bot as friend, or blocked the bot
-        print(f"Could not retrieve profile for user {user_id}: {e.code} {e.reason}")
+        # Detailed error handling for different HTTP status codes
+        error_body = None
+        try:
+            error_body = e.read().decode()
+        except:
+            pass
+        
+        if e.code == 400:
+            print(f"ERROR: Bad request when retrieving profile for user {user_id} in {context}: {e.code} {e.reason}")
+            if error_body:
+                print(f"  Error details: {error_body}")
+        elif e.code == 401:
+            print(f"ERROR: Authentication failed when retrieving profile. Check CHANNEL_ACCESS_TOKEN.")
+        elif e.code == 403:
+            print(f"ERROR: Forbidden - bot may not have permission to access profile for user {user_id} in {context}")
+        elif e.code == 404:
+            # User might not have added bot as friend, or blocked the bot, or not in group
+            print(f"INFO: Profile not found for user {user_id} in {context} (user may not have added bot, blocked bot, or not in group)")
+        else:
+            print(f"ERROR: HTTP {e.code} {e.reason} when retrieving profile for user {user_id} in {context}")
+            if error_body:
+                print(f"  Error details: {error_body}")
+                
+    except urllib.error.URLError as e:
+        print(f"ERROR: Network error when retrieving profile for user {user_id}: {e.reason}")
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Invalid JSON response when retrieving profile for user {user_id}: {e}")
     except Exception as e:
-        print(f"ERROR retrieving user profile: {e}")
+        print(f"ERROR retrieving user profile for {user_id}: {e}")
+        print(traceback.format_exc())
     
     return None
 
@@ -371,7 +431,25 @@ def normalize_language_code(code: str) -> str:
 
 def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /set commands."""
-    if cmd_info["type"] == "set_pair":
+    if cmd_info["type"] == "set_on":
+        # /set on - enable translation
+        if group_id:
+            update_group_setting(group_id, {"enabled": True})
+            send_reply(reply_token, "Translation enabled for this group ✓")
+        else:
+            update_user_setting(user_id, {"enabled": True})
+            send_reply(reply_token, "Translation enabled ✓")
+    
+    elif cmd_info["type"] == "set_off":
+        # /set off - disable translation
+        if group_id:
+            update_group_setting(group_id, {"enabled": False})
+            send_reply(reply_token, "Translation disabled for this group ✓")
+        else:
+            update_user_setting(user_id, {"enabled": False})
+            send_reply(reply_token, "Translation disabled ✓")
+    
+    elif cmd_info["type"] == "set_pair":
         source_input = cmd_info["source"]
         target_input = cmd_info["target"]
         
@@ -422,8 +500,46 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str,
             send_reply(reply_token, "American mode enabled ✓\nAll detected languages will be translated to American English.")
 
 
-def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
+def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str] = None, status_type: str = "status") -> None:
     """Handle /status command."""
+    if status_type == "status_version":
+        # Display version info
+        version_info = [
+            "Version Information:",
+            f"App Version: {APP_VERSION}"
+        ]
+        send_reply(reply_token, "\n".join(version_info))
+        return
+    
+    if status_type == "status_help":
+        # Display help information
+        help_text = [
+            "Commands start with /",
+            "/set on - enables translation for user",
+            "/set off - disables translation for user",
+            "/set language pair <source> <target> - sets specific language pair (e.g., /set language pair tc eng)",
+            "/set american - sets mode to translate all languages to American English",
+            "/status - returns current user settings",
+            "/status version",
+            "/status help",
+            "",
+            "Language options for /set language pair <source> <target>",
+            '"en": "en",',
+            '"zh-tw": "zh-TW",',
+            '"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)',
+            '"es": "es",',
+            '"ja": "ja",',
+            '"jpn": "ja",  # Also accept jpn',
+            '"th": "th",',
+            '"id": "id",',
+            '"ind": "id"  # Also accept ind',
+            "",
+            "Voice-to-text only available for paid customers!"
+        ]
+        send_reply(reply_token, "\n".join(help_text))
+        return
+    
+    # Regular status command
     if group_id:
         settings = get_group_setting(group_id)
         status_lines = ["Current Group Translation Settings:"]
@@ -519,14 +635,10 @@ def handle_message(event):
         # Check if message is a switch command
         cmd_info = parse_switch_command(user_message)
         if cmd_info:
-            if cmd_info["type"] == "on":
-                handle_on_command(user_id, event.reply_token, group_id)
-            elif cmd_info["type"] == "off":
-                handle_off_command(user_id, event.reply_token, group_id)
-            elif cmd_info["type"] in ["set_pair", "set_american"]:
+            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american"]:
                 handle_set_command(cmd_info, user_id, event.reply_token, group_id)
-            elif cmd_info["type"] == "status":
-                handle_status_command(user_id, event.reply_token, group_id)
+            elif cmd_info["type"] in ["status", "status_version", "status_help"]:
+                handle_status_command(user_id, event.reply_token, group_id, cmd_info["type"])
             return
         
         # Skip translation if message contains only emojis/LINE icons
@@ -552,12 +664,27 @@ def handle_message(event):
         # Only send reply if translation occurred and is different from original
         if translated != user_message and settings["enabled"]:
             # Try to get user's display name, fallback to user ID if unavailable
-            display_name = get_user_display_name(user_id)
+            # Pass group_id for proper profile retrieval in group chats
+            display_name = get_user_display_name(user_id, group_id)
             user_identifier = display_name if display_name else f"User ID: {user_id}"
             reply_text = f"{user_identifier}\nTranslated: {translated}"
             send_reply(event.reply_token, reply_text)
     except Exception as e:
         print(f"ERROR in handle_message: {e}")
+        print(traceback.format_exc())
+
+
+@handler.add(MessageEvent, message=StickerMessageContent)
+def handle_sticker_message(event):
+    """Handle sticker messages - skip translation for stickers."""
+    try:
+        user_id = event.source.user_id if hasattr(event.source, 'user_id') else None
+        if user_id:
+            print(f"Skipping translation for sticker message from user {user_id}")
+        # Stickers are not translated, just return
+        return
+    except Exception as e:
+        print(f"ERROR in handle_sticker_message: {e}")
         print(traceback.format_exc())
 
 

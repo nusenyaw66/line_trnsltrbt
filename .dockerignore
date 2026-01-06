@@ -49,3 +49,6 @@ Dockerfile
 # Exclude json and vector_store in ./db/ which will be copied to /tmp/ from GCS
 json/
 db/
+
+# Exclude .md files
+*.md

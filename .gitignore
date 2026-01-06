@@ -2,6 +2,7 @@
 .env
 .python-version
 poetry.lock
-project_note.md
+.md
+!README.md
 __pycache__
 

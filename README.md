@@ -8,6 +8,8 @@ Commands start with /
 /set language pair <source> <target> - sets specific language pair (e.g., /set language pair tc eng)
 /set american - sets mode to translate all languages to American English
 /status - returns current user settings
+/status version
+/status help
 
 Langage options for /set language pair <source> <target>
 "en": "en",
@@ -20,6 +22,8 @@ Langage options for /set language pair <source> <target>
 "id": "id",
 "ind": "id"  # Also accept ind
 
+Voice to text only available for paid customers!
+
 v0.0.2
 in /set language pair mode, added translation from soruce to target and vice versa.  Also Line user name (when available) will be displayed with Original message
 
@@ -31,3 +35,6 @@ changed only voice-to-text. I.e., souce voice will only be translated to text in
 
 v0.0.5
 ignore icon or Emoji only messages
+
+v0.0.8
+fixed Line displayName errors in line_translator_bot.py
