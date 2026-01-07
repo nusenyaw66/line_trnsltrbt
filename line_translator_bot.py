@@ -51,6 +51,33 @@ handler = WebhookHandler(CHANNEL_SECRET)
 _db_client: Optional[Client] = None
 _COLLECTION_NAME = "user_settings"
 
+# Common languages for american mode (prioritized list)
+# Google Cloud Speech-to-Text language codes for multi-language recognition
+# These are used when mode is "american" to detect any language and translate to English
+AMERICAN_MODE_LANGUAGES = [
+    "en-US",      # English (most common)
+    "zh-TW",      # Chinese (Traditional)
+    "es-ES",      # Spanish (Spain)
+    "es-MX",      # Spanish (Mexico)
+    "ja-JP",      # Japanese
+    "ko-KR",      # Korean
+    "fr-FR",      # French
+    "de-DE",      # German
+    "it-IT",      # Italian
+    "pt-BR",      # Portuguese (Brazil)
+    "pt-PT",      # Portuguese (Portugal)
+    "zh-CN",      # Chinese (Simplified)
+    "ru-RU",      # Russian
+    "ar-XA",      # Arabic
+    "hi-IN",      # Hindi
+    "th-TH",      # Thai
+    "id-ID",      # Indonesian
+    "vi-VN",      # Vietnamese
+    "nl-NL",      # Dutch
+    "pl-PL",      # Polish
+    "tr-TR",      # Turkish
+]
+
 
 def _get_db() -> Client:
     """Get Firestore client, initializing if needed."""
@@ -361,8 +388,8 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     
     Voice translation is enabled when:
     - Translation is enabled
-    - Mode is "pair"
-    - Language pair is "en" and "id" (in either direction)
+    - Mode is "pair" (with both source and target languages set and supported)
+    - OR mode is "american" (translates any language to English)
     
     Args:
         settings: User or group settings dictionary
@@ -373,17 +400,22 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     if not settings.get("enabled", False):
         return False
     
-    if settings.get("mode") != "pair":
-        return False
+    mode = settings.get("mode")
     
-    source_lang = settings.get("source_lang")
-    target_lang = settings.get("target_lang")
+    # Pair mode: requires both source and target languages
+    if mode == "pair":
+        source_lang = settings.get("source_lang")
+        target_lang = settings.get("target_lang")
+        # Supported languages for voice translation
+        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id"]
+        # Check if both languages are set and supported
+        if source_lang and target_lang:
+            if source_lang in supported_languages and target_lang in supported_languages:
+                return True
     
-    # Check if language pair is en-id or id-en
-    if source_lang == "en" and target_lang == "id":
-        return True
-    if source_lang == "id" and target_lang == "en":
-        return True
+    # American mode: translate any language to English
+    elif mode == "american":
+        return True  # American mode supports all languages that Speech-to-Text can recognize
     
     return False
 
@@ -506,7 +538,10 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
         # Display version info
         version_info = [
             "Version Information:",
-            f"App Version: {APP_VERSION}"
+            f"TranslatorBot App Version: {APP_VERSION}",
+            "Google Cloud API Version: 2.21.0",
+            "",
+            "Tesseract Technologies LLC, Meridian ID, USA"
         ]
         send_reply(reply_token, "\n".join(version_info))
         return
@@ -514,6 +549,8 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
     if status_type == "status_help":
         # Display help information
         help_text = [
+            "Add TranslatorBot to a group to use the bot.",
+            "",
             "Commands start with /",
             "/set on - enables translation for user",
             "/set off - disables translation for user",
@@ -529,12 +566,14 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
             '"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)',
             '"es": "es",',
             '"ja": "ja",',
-            '"jpn": "ja",  # Also accept jpn',
+            '"jpn": "ja",  # Also accepts jpn',
             '"th": "th",',
             '"id": "id",',
-            '"ind": "id"  # Also accept ind',
+            '"ind": "id"  # Also accepts ind',
             "",
-            "Voice-to-text only available for paid customers!"
+            "Voice-to-text is only available to paid customers!",
+            "See: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."
+           
         ]
         send_reply(reply_token, "\n".join(help_text))
         return
@@ -692,10 +731,10 @@ def handle_sticker_message(event):
 def handle_audio_message(event):
     """
     Handle audio/voice messages for voice translation.
-    Only processes when:
+    Processes when:
     - Translation is enabled
-    - Mode is "pair"
-    - Language pair is "en id" or "id en"
+    - Mode is "pair" (with both source and target languages set and supported)
+    - OR mode is "american" (translates any language to English)
     """
     try:
         user_id = event.source.user_id if hasattr(event.source, 'user_id') else None
@@ -719,12 +758,35 @@ def handle_audio_message(event):
         # Check if voice translation is enabled
         if not is_voice_translation_enabled(settings):
             # Voice translation not enabled, send informative message
-            send_reply(
-                event.reply_token,
-                "Voice translation is only available for English-Indonesian language pairs.\n"
-                "Please set language pair to 'en id' or 'id en' using:\n"
-                "/set language pair en id"
-            )
+            mode = settings.get("mode")
+            source_lang = settings.get("source_lang")
+            target_lang = settings.get("target_lang")
+            
+            if mode == "american":
+                send_reply(
+                    event.reply_token,
+                    "Voice translation is not enabled.\n"
+                    "Please enable translation using:\n"
+                    "/set american"
+                )
+            elif not source_lang or not target_lang:
+                send_reply(
+                    event.reply_token,
+                    "Voice translation requires a language pair to be set.\n"
+                    "Please set a language pair using:\n"
+                    "/set language pair <source> <target>\n\n"
+                    "Or use American mode:\n"
+                    "/set american\n\n"
+                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id"
+                )
+            else:
+                send_reply(
+                    event.reply_token,
+                    f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
+                    "Please ensure translation is enabled and both languages are supported.\n\n"
+                    "Supported languages: en, zh-TW, es, ja, th, id\n"
+                    "Or use American mode: /set american"
+                )
             return
         
         # Get audio message ID
@@ -742,6 +804,113 @@ def handle_audio_message(event):
             send_reply(event.reply_token, "Could not download audio. Please try again.")
             return
         
+        mode = settings.get("mode")
+        transcribed_text = None
+        detected_language = None
+        recognition_errors = []
+        
+        # Handle american mode
+        if mode == "american":
+            # American mode: try multiple languages to detect any language
+            # Google Cloud Speech-to-Text supports up to 4 alternative languages per request
+            # We'll try language groups sequentially
+            
+            # Try first group: English + top 4 alternatives
+            primary_lang = AMERICAN_MODE_LANGUAGES[0]
+            alternative_langs = AMERICAN_MODE_LANGUAGES[1:5]  # Max 4 alternatives
+            
+            print(f"Attempting speech recognition (American mode) with {primary_lang} and alternatives: {alternative_langs}")
+            try:
+                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
+                if transcribed_text and transcribed_text.strip():
+                    print(f"✓ Speech recognized (American mode): {transcribed_text}")
+                else:
+                    raise Exception("Recognition returned empty transcript")
+            except Exception as e:
+                error_msg = f"Recognition failed for first language group: {str(e)}"
+                print(error_msg)
+                recognition_errors.append(error_msg)
+                transcribed_text = None
+            
+            # If first group failed, try next groups (5 languages per group)
+            if not transcribed_text:
+                for group_start in range(5, len(AMERICAN_MODE_LANGUAGES), 5):
+                    group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
+                    if not group_languages:
+                        break
+                    
+                    primary = group_languages[0]
+                    alternatives = group_languages[1:5]  # Max 4 alternatives
+                    
+                    print(f"Attempting speech recognition (American mode) with {primary} and alternatives: {alternatives}")
+                    try:
+                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
+                        if transcribed_text and transcribed_text.strip():
+                            print(f"✓ Speech recognized (American mode): {transcribed_text}")
+                            break
+                        else:
+                            raise Exception("Recognition returned empty transcript")
+                    except Exception as e:
+                        error_msg = f"Recognition failed for language group starting with {primary}: {str(e)}"
+                        print(error_msg)
+                        recognition_errors.append(error_msg)
+                        continue
+            
+            # If all attempts failed, send error message
+            if not transcribed_text or not transcribed_text.strip():
+                error_details = "\n".join(recognition_errors[-3:]) if recognition_errors else "Unknown error"  # Show last 3 errors
+                print(f"All speech recognition attempts failed (American mode). Errors: {error_details}")
+                send_reply(
+                    event.reply_token,
+                    "Could not recognize speech. Please ensure:\n"
+                    "- Audio is clear and not too quiet\n"
+                    "- You're speaking in a supported language\n"
+                    "- Try speaking more slowly or clearly\n\n"
+                    "Note: Only languages supported by Google Cloud Speech-to-Text can be recognized."
+                )
+                return
+            
+            # Translate transcribed text to English using american mode
+            try:
+                translated_text = detect_and_translate(
+                    transcribed_text,
+                    enabled=True,
+                    source_lang=None,  # Let it auto-detect
+                    target_lang="en-US",
+                    mode="american"
+                )
+                
+                print(f"Translated (American mode): {transcribed_text} -> {translated_text}")
+                
+            except Exception as e:
+                print(f"ERROR translating text (American mode): {e}")
+                # Fallback: send transcribed text
+                send_reply(
+                    event.reply_token,
+                    f"Transcribed: {transcribed_text}\n(Translation to English failed)"
+                )
+                return
+            
+            # Send translated text
+            try:
+                reply_text = f"Translated: {translated_text}"
+                send_reply(event.reply_token, reply_text)
+                
+                print(f"Voice translation completed (American mode)")
+                print(f"Original: {transcribed_text}")
+                print(f"Translated: {translated_text}")
+                
+            except Exception as e:
+                print(f"ERROR sending reply: {e}")
+                print(traceback.format_exc())
+                try:
+                    send_reply(event.reply_token, translated_text)
+                except:
+                    pass
+            
+            return
+        
+        # Handle pair mode (existing logic)
         # Determine source and target languages
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
@@ -751,25 +920,42 @@ def handle_audio_message(event):
             send_reply(event.reply_token, "Error: Language pair not properly configured.")
             return
         
-        # Map to Speech-to-Text language codes
+        # Map translation language codes to Speech-to-Text language codes
+        # Google Cloud Speech-to-Text uses specific locale codes
         stt_language_map = {
             "en": "en-US",
+            "zh-TW": "zh-TW",
+            "es": "es-ES",  # Spanish (Spain), can also use es-MX for Mexico
+            "ja": "ja-JP",
+            "th": "th-TH",
             "id": "id-ID"
         }
         
+        # Get Speech-to-Text codes for both languages
+        source_stt_code = stt_language_map.get(source_lang)
+        target_stt_code = stt_language_map.get(target_lang)
+        
+        # Validate that both languages are supported
+        if not source_stt_code or not target_stt_code:
+            unsupported = []
+            if not source_stt_code:
+                unsupported.append(source_lang)
+            if not target_stt_code:
+                unsupported.append(target_lang)
+            send_reply(
+                event.reply_token,
+                f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
+                "Supported languages: en, zh-TW, es, ja, th, id"
+            )
+            return
+        
         # Try both languages for speech recognition (since we don't know which one was spoken)
         # First try source language, then target language
-        source_stt_code = stt_language_map.get(source_lang, "en-US")
-        target_stt_code = stt_language_map.get(target_lang, "id-ID")
         
-        transcribed_text = None
-        detected_language = None
-        recognition_errors = []
-        
-        # Try source language first
+        # Try source language first, with target language as alternative
         try:
             print(f"Attempting speech recognition with {source_lang} ({source_stt_code})...")
-            transcribed_text = speech_to_text(audio_content, source_stt_code)
+            transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code])
             if transcribed_text and transcribed_text.strip():
                 detected_language = source_lang
                 print(f"✓ Speech recognized in {source_lang}: {transcribed_text}")
@@ -781,11 +967,11 @@ def handle_audio_message(event):
             recognition_errors.append(error_msg)
             transcribed_text = None
         
-        # If source language failed, try target language
+        # If source language failed, try target language with source language as alternative
         if not transcribed_text:
             try:
                 print(f"Attempting speech recognition with {target_lang} ({target_stt_code})...")
-                transcribed_text = speech_to_text(audio_content, target_stt_code)
+                transcribed_text = speech_to_text(audio_content, target_stt_code, alternative_language_codes=[source_stt_code])
                 if transcribed_text and transcribed_text.strip():
                     detected_language = target_lang
                     print(f"✓ Speech recognized in {target_lang}: {transcribed_text}")
@@ -800,12 +986,24 @@ def handle_audio_message(event):
         if not transcribed_text or not transcribed_text.strip():
             error_details = "\n".join(recognition_errors) if recognition_errors else "Unknown error"
             print(f"All speech recognition attempts failed. Errors: {error_details}")
+            # Get language names for error message
+            lang_names = {
+                "en": "English",
+                "zh-TW": "Traditional Chinese",
+                "es": "Spanish",
+                "ja": "Japanese",
+                "th": "Thai",
+                "id": "Indonesian"
+            }
+            source_name = lang_names.get(source_lang, source_lang)
+            target_name = lang_names.get(target_lang, target_lang)
+            
             send_reply(
                 event.reply_token,
-                "Could not recognize speech. Please ensure:\n"
-                "- Audio is clear and not too quiet\n"
-                "- You're speaking in English or Indonesian\n"
-                "- Try speaking more slowly or clearly"
+                f"Could not recognize speech. Please ensure:\n"
+                f"- Audio is clear and not too quiet\n"
+                f"- You're speaking in {source_name} or {target_name}\n"
+                f"- Try speaking more slowly or clearly"
             )
             return
         

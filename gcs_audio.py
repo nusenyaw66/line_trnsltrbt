@@ -39,13 +39,14 @@ def _get_tts_client() -> Any:
     return _tts_client
 
 
-def speech_to_text(audio_content: bytes, language_code: str) -> str:
+def speech_to_text(audio_content: bytes, language_code: str, alternative_language_codes: Optional[list[str]] = None) -> str:
     """
     Convert audio content to text using Google Cloud Speech-to-Text.
     
     Args:
         audio_content: Audio file content as bytes
-        language_code: Language code (e.g., 'en-US', 'id-ID')
+        language_code: Language code (e.g., 'en-US', 'id-ID', 'zh-TW', 'es-ES', 'ja-JP', 'th-TH')
+        alternative_language_codes: Optional list of alternative language codes to try for better recognition
     
     Returns:
         Transcribed text
@@ -56,13 +57,8 @@ def speech_to_text(audio_content: bytes, language_code: str) -> str:
     try:
         client = _get_speech_client()
         
-        # Add alternative language codes for better recognition
-        # If recognizing Indonesian, also try English as alternative (and vice versa)
-        alternative_languages = []
-        if language_code == "id-ID":
-            alternative_languages = ["en-US"]
-        elif language_code == "en-US":
-            alternative_languages = ["id-ID"]
+        # Use provided alternative languages, or default to empty list
+        alternative_languages = alternative_language_codes or []
         
         # LINE sends audio in M4A format (AAC), but Google Cloud Speech supports various formats
         # We'll try multiple encodings and sample rates

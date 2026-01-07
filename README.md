@@ -38,3 +38,10 @@ ignore icon or Emoji only messages
 
 v0.0.8
 fixed Line displayName errors in line_translator_bot.py
+
+v0.2
+enabled voice-to-text for paired language mode 
+
+v0.4
+enabled voice-to-text for /set american mode
+refer to enable_voice_american_mode.plan.md
