@@ -307,12 +307,6 @@ check_and_grant_project_iam \
     "roles/speech.client" \
     "Cloud Run - Speech-to-Text API"
 
-# Allow service account to use Text-to-Speech API
-# Note: There is no predefined IAM role for Text-to-Speech API at the project level.
-# Permissions are typically handled automatically when the API is enabled (which we do above).
-# The service account will have access to the API when making requests.
-# echo -e "${GREEN}Text-to-Speech API permissions handled via API enablement (no explicit IAM role needed)${NC}"
-
 # Generate tag from APP_VERSION (read from .env file)
 if [ -n "${APP_VERSION:-}" ] && [ "${APP_VERSION}" != "unknown" ]; then
     # Use APP_VERSION, add 'v' prefix if not already present
