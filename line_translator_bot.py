@@ -685,6 +685,11 @@ def handle_message(event):
             print(f"Skipping translation for emoji-only message from user {user_id}")
             return
         
+        # Skip translation if message contains only emojis/LINE icons
+        if is_emoji_only(user_message):
+            print(f"Skipping translation for emoji-only message from user {user_id}")
+            return
+        
         # Not a command, apply translation based on settings
         # In group chats, use group settings; otherwise use user settings
         if group_id:
