@@ -63,8 +63,6 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     return False
 ```
 
-
-
 ### 2. Create Language Mapping for American Mode
 
 Create a comprehensive list of common languages for speech recognition in american mode:
@@ -140,8 +138,6 @@ if settings.get("mode") == "american":
     )
 ```
 
-
-
 ### 4. Handle Edge Cases
 
 - **Language not recognized:** Provide helpful error message
@@ -158,8 +154,6 @@ Update error messages to mention american mode support:
 "- Pair mode: /set language pair <source> <target>\n"
 "- American mode: /set american (translates any language to English)"
 ```
-
-
 
 ## Limitations
 

@@ -58,13 +58,13 @@ AMERICAN_MODE_LANGUAGES = [
     "en-US",      # English (most common)
     "zh-TW",      # Chinese (Traditional)
     "es-ES",      # Spanish (Spain)
-    "es-MX",      # Spanish (Mexico)
     "ja-JP",      # Japanese
     "ko-KR",      # Korean
     "fr-FR",      # French
     "de-DE",      # German
     "it-IT",      # Italian
     "pt-BR",      # Portuguese (Brazil)
+    "es-MX",      # Spanish (Mexico)
     "pt-PT",      # Portuguese (Portugal)
     "zh-CN",      # Chinese (Simplified)
     "ru-RU",      # Russian
@@ -267,6 +267,12 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
         # /set american
         elif parts[1] == 'american':
             return {"type": "set_american"}
+        # /set mandarin
+        elif parts[1] == 'mandarin':
+            return {"type": "set_mandarin"}
+        # /set japanese
+        elif parts[1] == 'japanese':
+            return {"type": "set_japanese"}
     
     # /status
     if command == '/status':
@@ -390,6 +396,8 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     - Translation is enabled
     - Mode is "pair" (with both source and target languages set and supported)
     - OR mode is "american" (translates any language to English)
+    - OR mode is "mandarin" (translates any language to Traditional Chinese)
+    - OR mode is "japanese" (translates any language to Japanese)
     
     Args:
         settings: User or group settings dictionary
@@ -416,6 +424,14 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     # American mode: translate any language to English
     elif mode == "american":
         return True  # American mode supports all languages that Speech-to-Text can recognize
+    
+    # Mandarin mode: translate any language to Traditional Chinese
+    elif mode == "mandarin":
+        return True  # Mandarin mode supports all languages that Speech-to-Text can recognize
+    
+    # Japanese mode: translate any language to Japanese
+    elif mode == "japanese":
+        return True  # Japanese mode supports all languages that Speech-to-Text can recognize
     
     return False
 
@@ -530,6 +546,34 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str,
         else:
             update_user_setting(user_id, settings_update)
             send_reply(reply_token, "American mode enabled ✓\nAll detected languages will be translated to American English.")
+    
+    elif cmd_info["type"] == "set_mandarin":
+        settings_update = {
+            "enabled": True,
+            "mode": "mandarin",
+            "source_lang": None,
+            "target_lang": "zh-TW"
+        }
+        if group_id:
+            update_group_setting(group_id, settings_update)
+            send_reply(reply_token, "Mandarin mode enabled for this group ✓\nAll detected languages will be translated to Traditional Chinese (Taiwan).")
+        else:
+            update_user_setting(user_id, settings_update)
+            send_reply(reply_token, "Mandarin mode enabled ✓\nAll detected languages will be translated to Traditional Chinese (Taiwan).")
+    
+    elif cmd_info["type"] == "set_japanese":
+        settings_update = {
+            "enabled": True,
+            "mode": "japanese",
+            "source_lang": None,
+            "target_lang": "ja"
+        }
+        if group_id:
+            update_group_setting(group_id, settings_update)
+            send_reply(reply_token, "Japanese mode enabled for this group ✓\nAll detected languages will be translated to Japanese.")
+        else:
+            update_user_setting(user_id, settings_update)
+            send_reply(reply_token, "Japanese mode enabled ✓\nAll detected languages will be translated to Japanese.")
 
 
 def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str] = None, status_type: str = "status") -> None:
@@ -549,13 +593,15 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
     if status_type == "status_help":
         # Display help information
         help_text = [
-            "Add TranslatorBot to a group to use the bot.",
+            "Add TranslatorBot to a group chat and enable translation for the group with following commands:",
             "",
             "Commands start with /",
             "/set on - enables translation for user",
             "/set off - disables translation for user",
             "/set language pair <source> <target> - sets specific language pair (e.g., /set language pair tc eng)",
             "/set american - sets mode to translate all languages to American English",
+            "/set mandarin - sets mode to translate all languages to Traditional Chinese (Taiwan)",
+            "/set japanese - sets mode to translate all languages to Japanese",
             "/status - returns current user settings",
             "/status version",
             "/status help",
@@ -596,6 +642,10 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
         status_lines.append(f"Target: {target}")
     elif settings['mode'] == 'american':
         status_lines.append("Target: American English (en-US)")
+    elif settings['mode'] == 'mandarin':
+        status_lines.append("Target: Traditional Chinese (zh-TW)")
+    elif settings['mode'] == 'japanese':
+        status_lines.append("Target: Japanese (ja)")
     
     send_reply(reply_token, "\n".join(status_lines))
 
@@ -674,7 +724,7 @@ def handle_message(event):
         # Check if message is a switch command
         cmd_info = parse_switch_command(user_message)
         if cmd_info:
-            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american"]:
+            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese"]:
                 handle_set_command(cmd_info, user_id, event.reply_token, group_id)
             elif cmd_info["type"] in ["status", "status_version", "status_help"]:
                 handle_status_command(user_id, event.reply_token, group_id, cmd_info["type"])
@@ -711,7 +761,7 @@ def handle_message(event):
             # Pass group_id for proper profile retrieval in group chats
             display_name = get_user_display_name(user_id, group_id)
             user_identifier = display_name if display_name else f"User ID: {user_id}"
-            reply_text = f"{user_identifier}\nTranslated: {translated}"
+            reply_text = f"{user_identifier}:\n{translated}"
             send_reply(event.reply_token, reply_text)
     except Exception as e:
         print(f"ERROR in handle_message: {e}")
@@ -740,6 +790,8 @@ def handle_audio_message(event):
     - Translation is enabled
     - Mode is "pair" (with both source and target languages set and supported)
     - OR mode is "american" (translates any language to English)
+    - OR mode is "mandarin" (translates any language to Traditional Chinese)
+    - OR mode is "japanese" (translates any language to Japanese)
     """
     try:
         user_id = event.source.user_id if hasattr(event.source, 'user_id') else None
@@ -753,6 +805,10 @@ def handle_audio_message(event):
         if isinstance(event.source, GroupSource):
             group_id = event.source.group_id
             print(f"Audio message received in group: {group_id} from user: {user_id}")
+        
+        # Get user's display name for reply messages (fallback to user ID if unavailable)
+        display_name = get_user_display_name(user_id, group_id)
+        user_identifier = display_name if display_name else f"User ID: {user_id}"
         
         # Get user/group settings
         if group_id:
@@ -774,6 +830,20 @@ def handle_audio_message(event):
                     "Please enable translation using:\n"
                     "/set american"
                 )
+            elif mode == "mandarin":
+                send_reply(
+                    event.reply_token,
+                    "Voice translation is not enabled.\n"
+                    "Please enable translation using:\n"
+                    "/set mandarin"
+                )
+            elif mode == "japanese":
+                send_reply(
+                    event.reply_token,
+                    "Voice translation is not enabled.\n"
+                    "Please enable translation using:\n"
+                    "/set japanese"
+                )
             elif not source_lang or not target_lang:
                 send_reply(
                     event.reply_token,
@@ -782,6 +852,10 @@ def handle_audio_message(event):
                     "/set language pair <source> <target>\n\n"
                     "Or use American mode:\n"
                     "/set american\n\n"
+                    "Or use Mandarin mode:\n"
+                    "/set mandarin\n\n"
+                    "Or use Japanese mode:\n"
+                    "/set japanese\n\n"
                     "Supported languages for pair mode: en, zh-TW, es, ja, th, id"
                 )
             else:
@@ -790,7 +864,9 @@ def handle_audio_message(event):
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
                     "Supported languages: en, zh-TW, es, ja, th, id\n"
-                    "Or use American mode: /set american"
+                    "Or use American mode: /set american\n"
+                    "Or use Mandarin mode: /set mandarin\n"
+                    "Or use Japanese mode: /set japanese"
                 )
             return
         
@@ -892,13 +968,13 @@ def handle_audio_message(event):
                 # Fallback: send transcribed text
                 send_reply(
                     event.reply_token,
-                    f"Transcribed: {transcribed_text}\n(Translation to English failed)"
+                    f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation to English failed)"
                 )
                 return
             
             # Send translated text
             try:
-                reply_text = f"Translated: {translated_text}"
+                reply_text = f"{user_identifier}:\n{translated_text}"
                 send_reply(event.reply_token, reply_text)
                 
                 print(f"Voice translation completed (American mode)")
@@ -909,7 +985,237 @@ def handle_audio_message(event):
                 print(f"ERROR sending reply: {e}")
                 print(traceback.format_exc())
                 try:
-                    send_reply(event.reply_token, translated_text)
+                    send_reply(event.reply_token, f"{user_identifier}:\n{translated_text}")
+                except:
+                    pass
+            
+            return
+        
+        # Handle mandarin mode
+        if mode == "mandarin":
+            # Mandarin mode: try multiple languages to detect any language
+            # Google Cloud Speech-to-Text supports up to 4 alternative languages per request
+            # We'll try language groups sequentially
+            
+            # Try first group: Traditional Chinese + top 4 alternatives
+            primary_lang = "zh-TW"
+            alternative_langs = AMERICAN_MODE_LANGUAGES[:4]  # Use first 4 from the list (excluding zh-TW if present)
+            # Remove zh-TW from alternatives if it's there, and ensure we have 4 alternatives
+            alternative_langs = [lang for lang in alternative_langs if lang != "zh-TW"][:4]
+            if len(alternative_langs) < 4:
+                # Add more languages if needed
+                additional = [lang for lang in AMERICAN_MODE_LANGUAGES[4:] if lang != "zh-TW"][:4-len(alternative_langs)]
+                alternative_langs.extend(additional)
+            
+            print(f"Attempting speech recognition (Mandarin mode) with {primary_lang} and alternatives: {alternative_langs}")
+            try:
+                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
+                if transcribed_text and transcribed_text.strip():
+                    print(f"✓ Speech recognized (Mandarin mode): {transcribed_text}")
+                else:
+                    raise Exception("Recognition returned empty transcript")
+            except Exception as e:
+                error_msg = f"Recognition failed for first language group: {str(e)}"
+                print(error_msg)
+                recognition_errors.append(error_msg)
+                transcribed_text = None
+            
+            # If first group failed, try next groups (5 languages per group)
+            if not transcribed_text:
+                for group_start in range(0, len(AMERICAN_MODE_LANGUAGES), 5):
+                    group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
+                    if not group_languages:
+                        break
+                    
+                    # Skip if zh-TW is already primary
+                    if group_languages[0] == "zh-TW" and group_start == 0:
+                        continue
+                    
+                    primary = group_languages[0]
+                    alternatives = [lang for lang in group_languages[1:5] if lang != "zh-TW"]  # Max 4 alternatives, exclude zh-TW
+                    # Ensure we have alternatives
+                    if len(alternatives) < 4:
+                        additional = [lang for lang in AMERICAN_MODE_LANGUAGES if lang not in alternatives and lang != "zh-TW"][:4-len(alternatives)]
+                        alternatives.extend(additional)
+                    
+                    print(f"Attempting speech recognition (Mandarin mode) with {primary} and alternatives: {alternatives}")
+                    try:
+                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
+                        if transcribed_text and transcribed_text.strip():
+                            print(f"✓ Speech recognized (Mandarin mode): {transcribed_text}")
+                            break
+                        else:
+                            raise Exception("Recognition returned empty transcript")
+                    except Exception as e:
+                        error_msg = f"Recognition failed for language group starting with {primary}: {str(e)}"
+                        print(error_msg)
+                        recognition_errors.append(error_msg)
+                        continue
+            
+            # If all attempts failed, send error message
+            if not transcribed_text or not transcribed_text.strip():
+                error_details = "\n".join(recognition_errors[-3:]) if recognition_errors else "Unknown error"  # Show last 3 errors
+                print(f"All speech recognition attempts failed (Mandarin mode). Errors: {error_details}")
+                send_reply(
+                    event.reply_token,
+                    "Could not recognize speech. Please ensure:\n"
+                    "- Audio is clear and not too quiet\n"
+                    "- You're speaking in a supported language\n"
+                    "- Try speaking more slowly or clearly\n\n"
+                    "Note: Only languages supported by Google Cloud Speech-to-Text can be recognized."
+                )
+                return
+            
+            # Translate transcribed text to Traditional Chinese using mandarin mode
+            try:
+                translated_text = detect_and_translate(
+                    transcribed_text,
+                    enabled=True,
+                    source_lang=None,  # Let it auto-detect
+                    target_lang="zh-TW",
+                    mode="mandarin"
+                )
+                
+                print(f"Translated (Mandarin mode): {transcribed_text} -> {translated_text}")
+                
+            except Exception as e:
+                print(f"ERROR translating text (Mandarin mode): {e}")
+                # Fallback: send transcribed text
+                send_reply(
+                    event.reply_token,
+                    f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation to Traditional Chinese failed)"
+                )
+                return
+            
+            # Send translated text
+            try:
+                reply_text = f"{user_identifier}:\n{translated_text}"
+                send_reply(event.reply_token, reply_text)
+                
+                print(f"Voice translation completed (Mandarin mode)")
+                print(f"Original: {transcribed_text}")
+                print(f"Translated: {translated_text}")
+                
+            except Exception as e:
+                print(f"ERROR sending reply: {e}")
+                print(traceback.format_exc())
+                try:
+                    send_reply(event.reply_token, f"{user_identifier}:\n{translated_text}")
+                except:
+                    pass
+            
+            return
+        
+        # Handle japanese mode
+        if mode == "japanese":
+            # Japanese mode: try multiple languages to detect any language
+            # Google Cloud Speech-to-Text supports up to 4 alternative languages per request
+            # We'll try language groups sequentially
+            
+            # Try first group: Japanese + top 4 alternatives
+            primary_lang = "ja-JP"
+            alternative_langs = AMERICAN_MODE_LANGUAGES[:4]  # Use first 4 from the list (excluding ja-JP if present)
+            # Remove ja-JP from alternatives if it's there, and ensure we have 4 alternatives
+            alternative_langs = [lang for lang in alternative_langs if lang != "ja-JP"][:4]
+            if len(alternative_langs) < 4:
+                # Add more languages if needed
+                additional = [lang for lang in AMERICAN_MODE_LANGUAGES[4:] if lang != "ja-JP"][:4-len(alternative_langs)]
+                alternative_langs.extend(additional)
+            
+            print(f"Attempting speech recognition (Japanese mode) with {primary_lang} and alternatives: {alternative_langs}")
+            try:
+                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
+                if transcribed_text and transcribed_text.strip():
+                    print(f"✓ Speech recognized (Japanese mode): {transcribed_text}")
+                else:
+                    raise Exception("Recognition returned empty transcript")
+            except Exception as e:
+                error_msg = f"Recognition failed for first language group: {str(e)}"
+                print(error_msg)
+                recognition_errors.append(error_msg)
+                transcribed_text = None
+            
+            # If first group failed, try next groups (5 languages per group)
+            if not transcribed_text:
+                for group_start in range(0, len(AMERICAN_MODE_LANGUAGES), 5):
+                    group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
+                    if not group_languages:
+                        break
+                    
+                    # Skip if ja-JP is the primary language (we already tried it)
+                    if group_languages[0] == "ja-JP":
+                        continue
+                    
+                    primary = group_languages[0]
+                    alternatives = [lang for lang in group_languages[1:5] if lang != "ja-JP"]  # Max 4 alternatives, exclude ja-JP
+                    # Ensure we have alternatives
+                    if len(alternatives) < 4:
+                        additional = [lang for lang in AMERICAN_MODE_LANGUAGES if lang not in alternatives and lang != "ja-JP"][:4-len(alternatives)]
+                        alternatives.extend(additional)
+                    
+                    print(f"Attempting speech recognition (Japanese mode) with {primary} and alternatives: {alternatives}")
+                    try:
+                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
+                        if transcribed_text and transcribed_text.strip():
+                            print(f"✓ Speech recognized (Japanese mode): {transcribed_text}")
+                            break
+                        else:
+                            raise Exception("Recognition returned empty transcript")
+                    except Exception as e:
+                        error_msg = f"Recognition failed for language group starting with {primary}: {str(e)}"
+                        print(error_msg)
+                        recognition_errors.append(error_msg)
+                        continue
+            
+            # If all attempts failed, send error message
+            if not transcribed_text or not transcribed_text.strip():
+                error_details = "\n".join(recognition_errors[-3:]) if recognition_errors else "Unknown error"  # Show last 3 errors
+                print(f"All speech recognition attempts failed (Japanese mode). Errors: {error_details}")
+                send_reply(
+                    event.reply_token,
+                    "Could not recognize speech. Please ensure:\n"
+                    "- Audio is clear and not too quiet\n"
+                    "- You're speaking in a supported language\n"
+                    "- Try speaking more slowly or clearly\n\n"
+                    "Note: Only languages supported by Google Cloud Speech-to-Text can be recognized."
+                )
+                return
+            
+            # Translate transcribed text to Japanese using japanese mode
+            try:
+                translated_text = detect_and_translate(
+                    transcribed_text,
+                    enabled=True,
+                    source_lang=None,  # Let it auto-detect
+                    target_lang="ja",
+                    mode="japanese"
+                )
+                
+                print(f"Translated (Japanese mode): {transcribed_text} -> {translated_text}")
+                
+            except Exception as e:
+                print(f"ERROR translating text (Japanese mode): {e}")
+                # Fallback: send transcribed text
+                send_reply(
+                    event.reply_token,
+                    f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation to Japanese failed)"
+                )
+                return
+            
+            # Send translated text
+            try:
+                reply_text = f"{user_identifier}:\n{translated_text}"
+                send_reply(event.reply_token, reply_text)
+                
+                print(f"Voice translation completed (Japanese mode)")
+                print(f"Original: {transcribed_text}")
+                print(f"Translated: {translated_text}")
+                
+            except Exception as e:
+                print(f"ERROR sending reply: {e}")
+                print(traceback.format_exc())
+                try:
+                    send_reply(event.reply_token, f"{user_identifier}:\n{translated_text}")
                 except:
                     pass
             
@@ -1039,14 +1345,14 @@ def handle_audio_message(event):
             # Fallback: send transcribed text
             send_reply(
                 event.reply_token,
-                f"Transcribed: {transcribed_text}\n(Translation failed)"
+                f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation failed)"
             )
             return
         
         # Send translated text as text message (no audio generation)
         try:
             # Format the response with original and translated text
-            reply_text = f"Translated: {translated_text}"
+            reply_text = f"{user_identifier}:\n{translated_text}"
             send_reply(event.reply_token, reply_text)
             
             print(f"Voice translation completed: {detected_language} -> {translation_target}")
@@ -1058,7 +1364,7 @@ def handle_audio_message(event):
             print(traceback.format_exc())
             # Try to send a simpler message
             try:
-                send_reply(event.reply_token, translated_text)
+                send_reply(event.reply_token, f"{user_identifier}:\n{translated_text}")
             except:
                 pass  # If we can't send reply, just log the error
             

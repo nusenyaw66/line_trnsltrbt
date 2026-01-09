@@ -45,3 +45,7 @@ enabled voice-to-text for paired language mode
 v0.4
 enabled voice-to-text for /set american mode
 refer to enable_voice_american_mode.plan.md
+
+v0.6 added /set maindrain mode
+
+v0.7 added /set japanese mode

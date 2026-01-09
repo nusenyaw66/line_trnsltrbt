@@ -54,7 +54,7 @@ def detect_and_translate(
         enabled: Whether translation is enabled
         source_lang: Source language code (for pair mode)
         target_lang: Target language code
-        mode: "pair" (bidirectional) or "american"
+        mode: "pair" (bidirectional), "american", "mandarin", or "japanese"
     
     Returns:
         Translated text, or original message if translation disabled/fails
@@ -72,6 +72,18 @@ def detect_and_translate(
             if detected_lang == "en" or detected_lang.startswith("en-"):
                 return message  # Already English
             return translate_text(message, "en-US")
+        
+        # Mandarin mode: translate any detected language to zh-TW
+        if mode == "mandarin":
+            if detected_lang in {"zh", "zh-CN", "zh-TW"}:
+                return message  # Already Traditional Chinese
+            return translate_text(message, "zh-TW")
+        
+        # Japanese mode: translate any detected language to ja
+        if mode == "japanese":
+            if detected_lang == "ja" or detected_lang.startswith("ja-"):
+                return message  # Already Japanese
+            return translate_text(message, "ja")
         
         # Pair mode: bidirectional translation (source ↔ target)
         if mode == "pair" and source_lang and target_lang:
