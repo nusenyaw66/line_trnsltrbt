@@ -49,3 +49,5 @@ refer to enable_voice_american_mode.plan.md
 v0.6 added /set maindrain mode
 
 v0.7 added /set japanese mode
+
+v0.8 added FB Messenger branch

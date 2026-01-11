@@ -4,6 +4,7 @@ from google.cloud import texttospeech_v1  # type: ignore
 import urllib.request
 import urllib.error
 import os
+import json
 
 
 # Speech-to-Text client (initialized lazily)
@@ -252,5 +253,100 @@ def download_line_audio(message_id: str, access_token: str) -> bytes:
         raise Exception(f"Failed to download audio from LINE: {e.code} {e.reason}")
     except Exception as e:
         print(f"ERROR downloading LINE audio: {e}")
+        raise
+
+
+def download_messenger_audio_from_url(audio_url: str, access_token: str) -> bytes:
+    """
+    Download audio content directly from a URL (for Messenger attachments with direct URLs).
+    
+    Args:
+        audio_url: Direct URL to the audio file
+        access_token: Facebook page access token
+    
+    Returns:
+        Audio content as bytes
+    
+    Raises:
+        Exception: If download fails
+    """
+    try:
+        req = urllib.request.Request(audio_url)
+        req.add_header("Authorization", f"Bearer {access_token}")
+        
+        with urllib.request.urlopen(req, timeout=30) as response:
+            if response.status == 200:
+                return response.read()
+            else:
+                raise Exception(f"Failed to download audio from URL: HTTP {response.status}")
+                
+    except urllib.error.HTTPError as e:
+        error_body = None
+        try:
+            error_body = e.read().decode()
+        except:
+            pass
+        print(f"HTTP Error downloading Messenger audio from URL: {e.code} {e.reason}")
+        if error_body:
+            print(f"  Error details: {error_body}")
+        raise Exception(f"Failed to download audio from URL: {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+        print(f"URL Error downloading Messenger audio: {e.reason}")
+        raise Exception(f"Failed to download audio from URL: {e.reason}")
+    except Exception as e:
+        print(f"ERROR downloading Messenger audio from URL: {e}")
+        raise
+
+
+def download_messenger_audio(attachment_id: str, access_token: str) -> bytes:
+    """
+    Download audio content from Facebook Messenger Graph API using attachment ID.
+    
+    First fetches the attachment metadata to get the URL, then downloads the audio file.
+    
+    Args:
+        attachment_id: Facebook attachment ID
+        access_token: Facebook page access token
+    
+    Returns:
+        Audio content as bytes
+    
+    Raises:
+        Exception: If download fails
+    """
+    try:
+        # First, get the attachment URL from the Graph API
+        url = f"https://graph.facebook.com/v21.0/{attachment_id}?access_token={access_token}"
+        
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            if response.status == 200:
+                attachment_data = json.loads(response.read().decode())
+                audio_url = attachment_data.get('url')
+                
+                if not audio_url:
+                    raise Exception(f"No URL in attachment data. Response: {json.dumps(attachment_data)}")
+                
+                # Download the actual audio file using the URL
+                return download_messenger_audio_from_url(audio_url, access_token)
+            else:
+                error_body = response.read().decode()
+                raise Exception(f"Failed to get attachment info: HTTP {response.status} - {error_body}")
+                
+    except urllib.error.HTTPError as e:
+        error_body = None
+        try:
+            error_body = e.read().decode()
+        except:
+            pass
+        print(f"HTTP Error downloading Messenger audio: {e.code} {e.reason}")
+        if error_body:
+            print(f"  Error details: {error_body}")
+        raise Exception(f"Failed to download audio from Messenger: {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+        print(f"URL Error downloading Messenger audio: {e.reason}")
+        raise Exception(f"Failed to download audio from Messenger: {e.reason}")
+    except Exception as e:
+        print(f"ERROR downloading Messenger audio: {e}")
         raise
 

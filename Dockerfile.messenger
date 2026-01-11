@@ -6,7 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for building wheels (line-bot-sdk, google-cloud-translate)
+# System deps for building wheels (google-cloud-translate, etc.)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends build-essential && \
     rm -rf /var/lib/apt/lists/*
@@ -21,10 +21,10 @@ RUN pip install --no-cache-dir poetry && \
 COPY . /app
 
 # Cloud Run will set $PORT; default to 8080 for local use
+# Messenger bot uses messenger_translator_bot.py
 # Use threaded workers for concurrent requests (gthread worker class)
 # --threads: Number of threads per worker (4 threads = can handle 4 concurrent requests)
-# --workers: Number of worker processes (2 workers with 4 threads = 8 concurrent requests)
+# --workers: Number of worker processes (1 worker with 4 threads = 4 concurrent requests)
 # --timeout: Request timeout in seconds (300s for audio processing)
 # --worker-class: Use gthread for I/O-bound tasks (webhooks, API calls)
-CMD ["gunicorn", "-b", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--worker-class", "gthread", "--timeout", "300", "--access-logfile", "-", "--error-logfile", "-", "line_translator_bot:app"]
-
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "--workers", "2", "--threads", "4", "--worker-class", "gthread", "--timeout", "300", "--access-logfile", "-", "--error-logfile", "-", "messenger_translator_bot:app"]

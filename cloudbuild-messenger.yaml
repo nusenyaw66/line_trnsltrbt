@@ -1,0 +1,65 @@
+options:
+  # Required when using custom service account for Cloud Build
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: asia-east1
+  _SERVICE: messenger-translator-bot
+  _TAG: latest
+  _FACEBOOK_ACCESS_TOKEN_SECRET: facebook-page-access-token
+  _FACEBOOK_SECRET_SECRET: facebook-app-secret
+  _FACEBOOK_VERIFY_TOKEN_SECRET: facebook-verify-token
+  _SERVICE_ACCOUNT: user-704@line-trnsltrbt.iam.gserviceaccount.com
+  _APP_VERSION: unknown
+
+steps:
+  # Build container
+  # Note: Cloud Build runs on amd64 by default, but we specify platform explicitly
+  # For local builds on macOS (Apple Silicon), use: docker build --platform=linux/amd64
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--platform=linux/amd64"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+      - "-f"
+      - "Dockerfile.messenger"
+      - "."
+
+  # Push to Artifact Registry
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+
+  # Deploy to Cloud Run
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: gcloud
+    args:
+      - "run"
+      - "deploy"
+      - "${_SERVICE}"
+      - "--image"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+      - "--region"
+      - "${_REGION}"
+      - "--allow-unauthenticated"
+      - "--port"
+      - "8080"
+      - "--memory"
+      - "2Gi"
+      - "--cpu"
+      - "2"
+      - "--min-instances"
+      - "0"
+      - "--max-instances"
+      - "10"
+      - "--set-secrets"
+      - "FACEBOOK_PAGE_ACCESS_TOKEN=${_FACEBOOK_ACCESS_TOKEN_SECRET}:latest,FACEBOOK_APP_SECRET=${_FACEBOOK_SECRET_SECRET}:latest,FACEBOOK_VERIFY_TOKEN=${_FACEBOOK_VERIFY_TOKEN_SECRET}:latest"
+      - "--set-env-vars"
+      - "APP_VERSION=${_APP_VERSION}"
+      - "--service-account"
+      - "${_SERVICE_ACCOUNT}"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
