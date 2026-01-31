@@ -60,6 +60,7 @@ AMERICAN_MODE_LANGUAGES = [
     "nl-NL",      # Dutch
     "pl-PL",      # Polish
     "tr-TR",      # Turkish
+    "fil-PH",     # Filipino (Tagalog)
 ]
 
 
@@ -414,7 +415,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         # Supported languages for voice translation
-        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id"]
+        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
         # Check if both languages are set and supported
         if source_lang and target_lang:
             if source_lang in supported_languages and target_lang in supported_languages:
@@ -494,7 +495,7 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, thread_id: Option
         target = normalize_language_code(target_input)
         
         # Supported Google Cloud language codes (proper format)
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id"]
+        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
         
         # Validate language codes
         if source not in supported_codes:
@@ -577,7 +578,11 @@ def normalize_language_code(code: str) -> str:
         "jpn": "ja",  # Also accept jpn
         "th": "th",
         "id": "id",
-        "ind": "id"  # Also accept ind
+        "ind": "id",  # Also accept ind
+        "fil": "fil",  # Filipino
+        "tl": "fil",  # Tagalog (maps to Filipino)
+        "tagalog": "fil",  # Also accept tagalog
+        "filipino": "fil"  # Also accept filipino
     }
     return code_map.get(code_lower, code)  # Return original if not in map
 
@@ -621,7 +626,11 @@ def handle_status_command(user_id: str, thread_id: Optional[str] = None, status_
             '"jpn": "ja",  # Also accepts jpn',
             '"th": "th",',
             '"id": "id",',
-            '"ind": "id"  # Also accepts ind',
+            '"ind": "id",  # Also accepts ind',
+            '"fil": "fil",  # Filipino',
+            '"tl": "fil",  # Tagalog (maps to Filipino)',
+            '"tagalog": "fil",  # Also accepts tagalog',
+            '"filipino": "fil",  # Also accepts filipino',
             "",
             "Voice-to-text is only available to paid customers!",
             "See: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."
@@ -890,14 +899,14 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
                     "/set mandarin\n\n"
                     "Or use Japanese mode:\n"
                     "/set japanese\n\n"
-                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id"
+                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil"
                 )
             else:
                 send_message(
                     user_id,
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
-                    "Supported languages: en, zh-TW, es, ja, th, id\n"
+                    "Supported languages: en, zh-TW, es, ja, th, id, fil\n"
                     "Or use American mode: /set american\n"
                     "Or use Mandarin mode: /set mandarin\n"
                     "Or use Japanese mode: /set japanese"
@@ -1265,7 +1274,8 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
             "es": "es-ES",  # Spanish (Spain), can also use es-MX for Mexico
             "ja": "ja-JP",
             "th": "th-TH",
-            "id": "id-ID"
+            "id": "id-ID",
+            "fil": "fil-PH"  # Filipino (Tagalog)
         }
         
         # Get Speech-to-Text codes for both languages
@@ -1282,7 +1292,7 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
             send_message(
                 user_id,
                 f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
-                "Supported languages: en, zh-TW, es, ja, th, id"
+                "Supported languages: en, zh-TW, es, ja, th, id, fil"
             )
             return
         
@@ -1330,7 +1340,8 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
                 "es": "Spanish",
                 "ja": "Japanese",
                 "th": "Thai",
-                "id": "Indonesian"
+                "id": "Indonesian",
+                "fil": "Filipino"
             }
             source_name = lang_names.get(source_lang, source_lang)
             target_name = lang_names.get(target_lang, target_lang)
