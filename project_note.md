@@ -25,6 +25,8 @@ $ deactivate
 ### ngrok
 Default port is `8080`. Use Ngrok (`ngrok http 8080`) to expose the webhook for Line validation.
 
+https://c2b9727017c0.ngrok-free.app
+
 ### GCS deployment
 # update your Application Default Credentials quota project
 gcloud auth application-default set-quota-project line-trnsltrbt

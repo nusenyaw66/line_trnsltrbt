@@ -93,6 +93,9 @@ def detect_and_translate(
                 if lang_code == "zh-TW":
                     # Handle Chinese variants
                     return detected in {"zh", "zh-CN", "zh-TW"}
+                if lang_code == "fil":
+                    # Handle Filipino/Tagalog variants
+                    return detected in {"fil", "tl"}
                 return detected == lang_code
             
             # Translate source → target

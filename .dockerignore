@@ -1,8 +1,5 @@
 .venv
 __pycache__
-.git
-.gitignore
-.env
 *.pyc
 *.pyo
 *.pyd
@@ -52,3 +49,6 @@ db/
 
 # Exclude .md files
 *.md
+
+# Exclude .sh files
+*.sh

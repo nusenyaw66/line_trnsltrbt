@@ -16,9 +16,11 @@ google-cloud-texttospeech = "^2.16.0"
 google-cloud-storage = "^2.18.0"
 gunicorn = "^21.2.0"
 psutil = "^5.9.0"
-line-bot-sdk = "3.17.0"
+line-bot-sdk = "3.17.0"  # Only needed for LINE bot (line_translator_bot.py)
 flask = "^3.1.0"
 flask-cors = "^5.0.0"
+# Note: Facebook Messenger bot (messenger_translator_bot.py) uses standard library only
+# (urllib, json, hmac, hashlib) - no additional dependencies needed
 
 [tool.pyright]
 # https://github.com/microsoft/pyright/blob/main/docs/configuration.md
