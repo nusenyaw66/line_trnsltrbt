@@ -85,3 +85,29 @@ Create/update secrets from your .env file
 Grant IAM permissions
 Build and deploy to Cloud Run
 The Cloud Run service will be publicly accessible (for LINE webhook) and configured with secrets from Secret Manager.
+
+### webhook secret - generate with openssl
+# 32 bytes → 64 hex chars (512 bits entropy)
+openssl rand -hex 32
+
+###Telegram
+Webhook: After deploy, set Telegram webhook:
+
+https://api.telegram.org/bot8472758900:AAEt0LyojKu4X6bOnd692_F80xzKId2vmpE/setWebhook?url=https://telegram-translator-bot-2saawhf4kq-uc.a.run.app/webhook&secret_token=e024bacd0307d5766f686c8a1f4889c37b0b96102709fae42e58c056c53e108e
+
+ curl -F "url=https://telegram-translator-bot-2saawhf4kq-uc.a.run.app/webhook" \
+     -F "secret_token=e024bacd0307d5766f686c8a1f4889c37b0b96102709fae42e58c056c53e108e" \
+     https://api.telegram.org/bot8472758900:AAEt0LyojKu4X6bOnd692_F80xzKId2vmpE/setWebhook
+
+curl https://api.telegram.org/bot8472758900:AAEt0LyojKu4X6bOnd692_F80xzKId2vmpE/getWebhookInfo
+
+### Telegram: translation not working in groups
+**Cause:** Group Privacy Mode is ON by default. With it ON, the bot only receives:
+- Messages starting with `/` (so /set, /status work)
+- Replies to the bot's messages
+- @mentions of the bot
+
+Regular text and voice messages are **not** delivered, so translation never runs.
+
+**Fix:** In Telegram, open @BotFather → send `/setprivacy` → select your bot → choose **Disable**.
+After disabling, remove the bot from the group and add it again (or restart the bot from group member details) so the change applies.

@@ -1,0 +1,52 @@
+options:
+  logging: CLOUD_LOGGING_ONLY
+
+substitutions:
+  _REGION: asia-east1
+  _SERVICE: telegram-translator-bot
+  _TAG: latest
+  _TELEGRAM_BOT_TOKEN_SECRET: telegram-bot-token
+  _TELEGRAM_WEBHOOK_SECRET_NAME: ''
+  _SERVICE_ACCOUNT: user-704@line-trnsltrbt.iam.gserviceaccount.com
+  _APP_VERSION: unknown
+
+steps:
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "build"
+      - "--platform=linux/amd64"
+      - "-t"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+      - "-f"
+      - "Dockerfile.telegram"
+      - "."
+
+  - name: "gcr.io/cloud-builders/docker"
+    args:
+      - "push"
+      - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"
+
+  - name: "gcr.io/google.com/cloudsdktool/cloud-sdk"
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        SECRETS="TELEGRAM_BOT_TOKEN=${_TELEGRAM_BOT_TOKEN_SECRET}:latest"
+        if [ -n "${_TELEGRAM_WEBHOOK_SECRET_NAME}" ]; then
+          SECRETS="$${SECRETS},TELEGRAM_WEBHOOK_SECRET=${_TELEGRAM_WEBHOOK_SECRET_NAME}:latest"
+        fi
+        gcloud run deploy "${_SERVICE}" \
+          --image "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}" \
+          --region "${_REGION}" \
+          --allow-unauthenticated \
+          --port 8080 \
+          --memory 2Gi \
+          --cpu 2 \
+          --min-instances 0 \
+          --max-instances 10 \
+          --set-secrets "$${SECRETS}" \
+          --set-env-vars "APP_VERSION=${_APP_VERSION}" \
+          --service-account "${_SERVICE_ACCOUNT}"
+
+images:
+  - "${_REGION}-docker.pkg.dev/${PROJECT_ID}/line-trnsltrbt/${_SERVICE}:${_TAG}"

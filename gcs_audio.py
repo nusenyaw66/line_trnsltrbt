@@ -350,3 +350,55 @@ def download_messenger_audio(attachment_id: str, access_token: str) -> bytes:
         print(f"ERROR downloading Messenger audio: {e}")
         raise
 
+
+def download_telegram_audio(file_id: str, bot_token: str) -> bytes:
+    """
+    Download audio content from Telegram Bot API using file_id.
+
+    Calls getFile to get file_path, then downloads from api.telegram.org/file.
+
+    Args:
+        file_id: Telegram file_id (from message.voice.file_id etc.)
+        bot_token: Telegram bot token
+
+    Returns:
+        Audio content as bytes
+
+    Raises:
+        Exception: If getFile or download fails
+    """
+    try:
+        get_file_url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
+        req = urllib.request.Request(get_file_url)
+        with urllib.request.urlopen(req, timeout=30) as response:
+            if response.status != 200:
+                raise Exception(f"getFile failed: HTTP {response.status}")
+            data = json.loads(response.read().decode())
+        if not data.get("ok"):
+            raise Exception(f"getFile error: {data.get('description', 'unknown')}")
+        file_path = data.get("result", {}).get("file_path")
+        if not file_path:
+            raise Exception("getFile response missing file_path")
+        download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+        req = urllib.request.Request(download_url)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            if resp.status != 200:
+                raise Exception(f"Download failed: HTTP {resp.status}")
+            return resp.read()
+    except urllib.error.HTTPError as e:
+        error_body = None
+        try:
+            error_body = e.read().decode()
+        except Exception:
+            pass
+        print(f"HTTP Error downloading Telegram audio: {e.code} {e.reason}")
+        if error_body:
+            print(f"  Error details: {error_body}")
+        raise Exception(f"Failed to download audio from Telegram: {e.code} {e.reason}")
+    except urllib.error.URLError as e:
+        print(f"URL Error downloading Telegram audio: {e.reason}")
+        raise Exception(f"Failed to download audio from Telegram: {e.reason}")
+    except Exception as e:
+        print(f"ERROR downloading Telegram audio: {e}")
+        raise
+

@@ -647,8 +647,7 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
     if settings['mode'] == 'pair':
         source = settings.get('source_lang', 'Not set')
         target = settings.get('target_lang', 'Not set')
-        status_lines.append(f"Source: {source}")
-        status_lines.append(f"Target: {target}")
+        status_lines.append(f"Languages: {source} <--> {target}")
     elif settings['mode'] == 'american':
         status_lines.append("Target: American English (en-US)")
     elif settings['mode'] == 'mandarin':
