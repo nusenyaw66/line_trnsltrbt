@@ -202,7 +202,7 @@ echo -e "${GREEN}All required secrets exist.${NC}"
 
 # Build and deploy
 echo -e "${GREEN}Building and deploying to Cloud Run...${NC}"
-TAG=$(date +%Y%m%d-%H%M%S)
+TAG="${APP_VERSION:-unknown}"
 
 # Pass webhook secret name if it exists (TELEGRAM_WEBHOOK_SECRET from .env)
 WEBHOOK_SECRET_ARG=""
