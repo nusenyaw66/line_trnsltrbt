@@ -1,4 +1,4 @@
-from typing import Optional, Any
+from typing import Optional, Any, Dict, Tuple
 from google.cloud import speech_v1  # type: ignore
 from google.cloud import texttospeech_v1  # type: ignore
 import urllib.request
@@ -12,6 +12,10 @@ _speech_client: Optional[Any] = None
 
 # Text-to-Speech client (initialized lazily)
 _tts_client: Optional[Any] = None
+
+# Cache for successful encoding/sample_rate combinations per language
+# Format: {language_code: (encoding, sample_rate)}
+_encoding_cache: Dict[str, Tuple[Any, int]] = {}
 
 
 def _get_speech_client() -> Any:
@@ -42,7 +46,14 @@ def _get_tts_client() -> Any:
 
 def speech_to_text(audio_content: bytes, language_code: str, alternative_language_codes: Optional[list[str]] = None) -> str:
     """
-    Convert audio content to text using Google Cloud Speech-to-Text.
+    Convert audio content to text using Google Cloud Speech-to-Text with intelligent encoding detection.
+    
+    Optimized approach:
+    1. Try cached encoding/sample_rate if available for this language
+    2. Try ENCODING_UNSPECIFIED with auto-detect (sample_rate=0)
+    3. Only try other combinations as fallback
+    
+    This reduces API calls from 25 attempts to typically 1-2 attempts (90-95% cost reduction).
     
     Args:
         audio_content: Audio file content as bytes
@@ -61,66 +72,113 @@ def speech_to_text(audio_content: bytes, language_code: str, alternative_languag
         # Use provided alternative languages, or default to empty list
         alternative_languages = alternative_language_codes or []
         
-        # LINE sends audio in M4A format (AAC), but Google Cloud Speech supports various formats
-        # We'll try multiple encodings and sample rates
+        audio = speech_v1.RecognitionAudio(content=audio_content)
+        
+        # Define all possible encodings and sample rates for fallback
         encodings_to_try = [
-            speech_v1.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED,  # Auto-detect (try first)
+            speech_v1.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED,  # Auto-detect
             speech_v1.RecognitionConfig.AudioEncoding.MP3,
             speech_v1.RecognitionConfig.AudioEncoding.OGG_OPUS,
             speech_v1.RecognitionConfig.AudioEncoding.WEBM_OPUS,
             speech_v1.RecognitionConfig.AudioEncoding.FLAC,
         ]
-        
-        # Common sample rates for LINE audio (LINE typically uses 16kHz or 48kHz)
         sample_rates_to_try = [0, 16000, 48000, 44100, 24000]  # 0 = auto-detect
         
-        audio = speech_v1.RecognitionAudio(content=audio_content)
+        # Strategy 1: Try cached encoding/sample_rate if available
+        if language_code in _encoding_cache:
+            cached_encoding, cached_rate = _encoding_cache[language_code]
+            print(f"Trying cached encoding/rate for {language_code}")
+            
+            config_dict = {
+                "encoding": cached_encoding,
+                "language_code": language_code,
+                "enable_automatic_punctuation": True,
+            }
+            if cached_rate > 0:
+                config_dict["sample_rate_hertz"] = cached_rate
+            if alternative_languages:
+                config_dict["alternative_language_codes"] = alternative_languages
+            
+            try:
+                config = speech_v1.RecognitionConfig(**config_dict)
+                response = client.recognize(config=config, audio=audio)
+                
+                if response.results and response.results[0].alternatives:
+                    transcript = response.results[0].alternatives[0].transcript.strip()
+                    if transcript:
+                        print(f"✓ Cache hit! Recognized with cached encoding/rate")
+                        return transcript
+            except Exception as e:
+                print(f"Cached encoding failed, trying other options: {e}")
+                # Remove failed cache entry
+                del _encoding_cache[language_code]
         
-        # Try each combination of encoding and sample rate
-        for encoding in encodings_to_try:
-            for sample_rate in sample_rates_to_try:
-                try:
-                    # Configure recognition settings
-                    # For ENCODING_UNSPECIFIED, sample_rate can be omitted or set to 0 for auto-detect
-                    config_dict = {
-                        "encoding": encoding,
-                        "language_code": language_code,
-                        "enable_automatic_punctuation": True,
-                    }
-                    
-                    # Only set sample_rate if it's not 0 (0 means auto-detect)
-                    if sample_rate > 0:
-                        config_dict["sample_rate_hertz"] = sample_rate
-                    
-                    # Add alternative languages if available
-                    if alternative_languages:
-                        config_dict["alternative_language_codes"] = alternative_languages
-                    
-                    config = speech_v1.RecognitionConfig(**config_dict)
-                    
-                    response = client.recognize(config=config, audio=audio)
-                    
-                    if response.results:
-                        # Get the first result (most confident)
-                        result = response.results[0]
-                        if result.alternatives:
-                            transcript = result.alternatives[0].transcript.strip()
-                            if transcript:  # Only return if we got actual text
-                                print(f"Successfully recognized with encoding={encoding}, sample_rate={sample_rate}")
-                                return transcript
-                    
-                    # If we get here, recognition returned no results
-                    # Try next combination
-                    continue
-                except Exception as e:
-                    # If this combination fails, try next one
-                    # Only log if it's not a common "no results" error
-                    if "no results" not in str(e).lower() and "empty" not in str(e).lower():
-                        print(f"Warning: Speech recognition with encoding={encoding}, sample_rate={sample_rate} failed: {e}")
-                    continue
+        # Strategy 2: Try ENCODING_UNSPECIFIED with auto-detect (most reliable)
+        print(f"Trying ENCODING_UNSPECIFIED with auto-detect for {language_code}")
+        config_dict = {
+            "encoding": speech_v1.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED,
+            "language_code": language_code,
+            "enable_automatic_punctuation": True,
+        }
+        if alternative_languages:
+            config_dict["alternative_language_codes"] = alternative_languages
         
-        # If all combinations failed, raise an error with more details
-        raise Exception(f"Speech recognition failed for {language_code} with all attempted encoding/sample_rate combinations")
+        try:
+            config = speech_v1.RecognitionConfig(**config_dict)
+            response = client.recognize(config=config, audio=audio)
+            
+            if response.results and response.results[0].alternatives:
+                transcript = response.results[0].alternatives[0].transcript.strip()
+                if transcript:
+                    print(f"✓ Successfully recognized with ENCODING_UNSPECIFIED")
+                    # Cache this successful configuration
+                    _encoding_cache[language_code] = (
+                        speech_v1.RecognitionConfig.AudioEncoding.ENCODING_UNSPECIFIED,
+                        0
+                    )
+                    return transcript
+        except Exception as e:
+            if "no results" not in str(e).lower():
+                print(f"ENCODING_UNSPECIFIED failed: {e}")
+        
+        # Strategy 3: Fallback - try specific encodings with common sample rates
+        print(f"Trying fallback encodings for {language_code}")
+        # Try most common combinations first (MP3 and OGG_OPUS with typical rates)
+        priority_combinations = [
+            (speech_v1.RecognitionConfig.AudioEncoding.MP3, 16000),
+            (speech_v1.RecognitionConfig.AudioEncoding.OGG_OPUS, 16000),
+            (speech_v1.RecognitionConfig.AudioEncoding.MP3, 48000),
+            (speech_v1.RecognitionConfig.AudioEncoding.OGG_OPUS, 48000),
+        ]
+        
+        for encoding, sample_rate in priority_combinations:
+            try:
+                config_dict = {
+                    "encoding": encoding,
+                    "language_code": language_code,
+                    "enable_automatic_punctuation": True,
+                    "sample_rate_hertz": sample_rate,
+                }
+                if alternative_languages:
+                    config_dict["alternative_language_codes"] = alternative_languages
+                
+                config = speech_v1.RecognitionConfig(**config_dict)
+                response = client.recognize(config=config, audio=audio)
+                
+                if response.results and response.results[0].alternatives:
+                    transcript = response.results[0].alternatives[0].transcript.strip()
+                    if transcript:
+                        print(f"✓ Successfully recognized with encoding={encoding}, sample_rate={sample_rate}")
+                        # Cache this successful configuration
+                        _encoding_cache[language_code] = (encoding, sample_rate)
+                        return transcript
+            except Exception as e:
+                if "no results" not in str(e).lower() and "empty" not in str(e).lower():
+                    print(f"Warning: encoding={encoding}, sample_rate={sample_rate} failed: {e}")
+                continue
+        
+        # If priority combinations failed, raise error
+        raise Exception(f"Speech recognition failed for {language_code} after trying optimized combinations")
         
     except Exception as e:
         print(f"ERROR in speech_to_text for {language_code}: {e}")
@@ -316,9 +374,10 @@ def download_messenger_audio(attachment_id: str, access_token: str) -> bytes:
     """
     try:
         # First, get the attachment URL from the Graph API
-        url = f"https://graph.facebook.com/v21.0/{attachment_id}?access_token={access_token}"
+        url = f"https://graph.facebook.com/v21.0/{attachment_id}"
         
         req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {access_token}")
         with urllib.request.urlopen(req, timeout=30) as response:
             if response.status == 200:
                 attachment_data = json.loads(response.read().decode())

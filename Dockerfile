@@ -1,4 +1,27 @@
-FROM python:3.13-slim
+# Multi-stage build for optimized production image
+# Stage 1: Builder - install dependencies
+FROM python:3.13.1-slim-bookworm AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /build
+
+# Install system dependencies needed for building Python packages
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Poetry and dependencies
+COPY pyproject.toml poetry.lock /build/
+RUN pip install --no-cache-dir poetry==2.3.1 && \
+    poetry config virtualenvs.create false && \
+    poetry install --no-interaction --no-ansi --no-root --only main
+
+# Stage 2: Runtime - minimal production image
+FROM python:3.13.1-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,19 +29,18 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System deps for building wheels (line-bot-sdk, google-cloud-translate)
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends build-essential && \
-    rm -rf /var/lib/apt/lists/*
-
-# Install dependencies via Poetry (no virtualenv to keep image small)
-COPY pyproject.toml poetry.lock* /app/
-RUN pip install --no-cache-dir poetry && \
-    poetry config virtualenvs.create false && \
-    poetry install --no-interaction --no-ansi --no-root
+# Copy Python packages from builder
+COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy application code
 COPY . /app
+
+# Create non-root user for security
+RUN groupadd -r appuser && useradd -r -g appuser appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
 
 # Cloud Run will set $PORT; default to 8080 for local use
 # Use threaded workers for concurrent requests (gthread worker class)

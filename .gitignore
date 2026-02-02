@@ -1,7 +1,6 @@
 .DS_Store
 .env
 .python-version
-poetry.lock
 .md
 !README.md
 __pycache__

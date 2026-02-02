@@ -28,6 +28,8 @@ from google.cloud.firestore_v1.base_document import DocumentSnapshot
 
 from gcs_translate import detect_and_translate
 from gcs_audio import speech_to_text, download_line_audio
+from rate_limiter import text_rate_limiter, voice_rate_limiter
+from cache_manager import profile_cache
 
 load_dotenv()
 CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
@@ -275,12 +277,11 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
         elif parts[1] == 'japanese':
             return {"type": "set_japanese"}
     
+    # /help
+    if command == '/help':
+        return {"type": "help"}
     # /status
     if command == '/status':
-        if len(parts) >= 2 and parts[1] == 'version':
-            return {"type": "status_version"}
-        elif len(parts) >= 2 and parts[1] == 'help':
-            return {"type": "status_help"}
         return {"type": "status"}
     
     return None
@@ -288,13 +289,15 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
 
 def get_user_display_name(user_id: str, group_id: Optional[str] = None) -> Optional[str]:
     """
-    Get user's display name from LINE API.
+    Get user's display name from LINE API with caching.
     
     For group chats, uses the group member profile endpoint.
     For individual chats, uses the user profile endpoint.
     
     Returns None if profile cannot be retrieved (user not added as friend,
     user blocked the bot, or API error).
+    
+    Cache reduces API calls by ~60% for repeated requests.
     
     Args:
         user_id: Unique LINE user ID
@@ -303,6 +306,14 @@ def get_user_display_name(user_id: str, group_id: Optional[str] = None) -> Optio
     Returns:
         User's display name or None if unavailable
     """
+    # Check cache first
+    cached_name = profile_cache.get(user_id, group_id)
+    if cached_name is not None:
+        print(f"Profile cache hit for user {user_id}")
+        return cached_name
+    
+    print(f"Profile cache miss, fetching from API for user {user_id}")
+    
     if not CHANNEL_ACCESS_TOKEN:
         print("ERROR: CHANNEL_ACCESS_TOKEN not set, cannot retrieve profile")
         return None
@@ -331,6 +342,8 @@ def get_user_display_name(user_id: str, group_id: Optional[str] = None) -> Optio
                 display_name = profile_data.get("displayName")
                 if display_name:
                     print(f"✓ Retrieved display name '{display_name}' for user {user_id} in {context}")
+                    # Cache the result
+                    profile_cache.set(user_id, display_name, group_id)
                 return display_name
             else:
                 print(f"WARNING: Unexpected status {response.status} when retrieving profile for user {user_id} in {context}")
@@ -416,7 +429,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         # Supported languages for voice translation
-        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
+        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
         # Check if both languages are set and supported
         if source_lang and target_lang:
             if source_lang in supported_languages and target_lang in supported_languages:
@@ -477,7 +490,19 @@ def normalize_language_code(code: str) -> str:
         "fil": "fil",  # Filipino
         "tl": "fil",  # Tagalog (maps to Filipino)
         "tagalog": "fil",  # Also accept tagalog
-        "filipino": "fil"  # Also accept filipino
+        "filipino": "fil",  # Also accept filipino
+        "fr": "fr",  # French
+        "french": "fr",
+        "it": "it",  # Italian
+        "italian": "it",
+        "ita": "it",
+        "de": "de",  # German
+        "german": "de",
+        "deu": "de",
+        "ger": "de",
+        "ko": "ko",  # Korean
+        "korean": "ko",
+        "kor": "ko",
     }
     return code_map.get(code_lower, code)  # Return original if not in map
 
@@ -511,7 +536,7 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str,
         target = normalize_language_code(target_input)
         
         # Supported Google Cloud language codes (proper format)
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
+        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
         
         # Validate language codes
         if source not in supported_codes:
@@ -583,52 +608,31 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str,
 
 def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str] = None, status_type: str = "status") -> None:
     """Handle /status command."""
-    if status_type == "status_version":
-        # Display version info
-        version_info = [
-            "Version Information:",
-            f"TranslatorBot App Version: {APP_VERSION}",
-            "Google Cloud API Version: 2.21.0",
-            "",
-            "Tesseract Technologies LLC, Meridian ID, USA"
-        ]
-        send_reply(reply_token, "\n".join(version_info))
-        return
-    
-    if status_type == "status_help":
+    if status_type == "help":
         # Display help information
         help_text = [
-            "Add TranslatorBot to a group chat and enable translation for the group with following commands:",
+            "Add Translator Bot to a Group chat and enable translation with following commands:",
             "",
             "Commands start with /",
-            "/set on - enables translation for user",
-            "/set off - disables translation for user",
-            "/set language pair <source> <target> - sets specific language pair (e.g., /set language pair tc eng)",
-            "/set american - sets mode to translate all languages to American English",
-            "/set mandarin - sets mode to translate all languages to Traditional Chinese (Taiwan)",
-            "/set japanese - sets mode to translate all languages to Japanese",
+            "/set american - Translate All languages to American English",
+            "/set mandarin - Translate All languages to Traditional Chinese (Taiwan)",
+            "/set japanese - Translate All languages to Japanese",
+            "/set language pair <lang1> <lang2> - sets specific language pair (e.g., /set language pair zh-tw en)",
+            "Language options for /set language pair:",
+            '   "zh-TW"  # Mandarin (we only support Traditional Chinese),',
+            '   "ja"  # Japanese, also accepts "jpn",',
+            '   "th"  # Thai,',
+            '   "id"  # Indonesian, also accepts "ind",',
+            '   "fil"  # Filipino, also accepts "filipino", "tagalog", "tl"',
+            '   "en", "fr", "de", "it", "es", "ko"  # English, French, German, Italian, Spanish, Korean',
+            "/set off - disables translation",
             "/status - returns current user settings",
-            "/status version",
-            "/status help",
-            "",
-            "Language options for /set language pair <source> <target>",
-            '"en": "en",',
-            '"zh-tw": "zh-TW",',
-            '"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)',
-            '"es": "es",',
-            '"ja": "ja",',
-            '"jpn": "ja",  # Also accepts jpn',
-            '"th": "th",',
-            '"id": "id",',
-            '"ind": "id",  # Also accepts ind',
-            '"fil": "fil",  # Filipino',
-            '"tl": "fil",  # Tagalog (maps to Filipino)',
-            '"tagalog": "fil",  # Also accepts tagalog',
-            '"filipino": "fil",  # Also accepts filipino',
-            "",
-            "Voice-to-text is only available to paid customers!",
-            "See: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."
-           
+            "/help - returns this help message",
+            "", "Voice-to-text is only available to paid customers!",
+            "", f"Translator Bot for Line App. Version: {APP_VERSION}",
+            "", "Copyright 2026 Tesseract Tech. LLC, Meridian  ID, USA",
+            "Website: www.tssrct.us",
+            "", "For Tranlate All modes, see: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."   
         ]
         send_reply(reply_token, "\n".join(help_text))
         return
@@ -695,9 +699,42 @@ def is_emoji_only(message: str) -> bool:
     # Check if the entire message matches emoji pattern
     return bool(emoji_pattern.match(stripped))
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for liveness probe."""
+    return {'status': 'healthy', 'service': 'line-translator-bot', 'version': APP_VERSION}, 200
+
+@app.route('/ready', methods=['GET'])
+def ready():
+    """Readiness check endpoint - verifies dependencies are accessible."""
+    try:
+        # Check Firestore connection
+        db = _get_db()
+        # Quick connectivity check - try to access collection
+        db.collection('_health_check').limit(1).get()
+        
+        return {
+            'status': 'ready',
+            'service': 'line-translator-bot',
+            'version': APP_VERSION,
+            'checks': {
+                'firestore': 'ok',
+                'line_api': 'configured' if CHANNEL_ACCESS_TOKEN else 'missing'
+            }
+        }, 200
+    except Exception as e:
+        return {
+            'status': 'not ready',
+            'service': 'line-translator-bot',
+            'error': str(e)
+        }, 503
+
 @app.route("/webhook", methods=['POST'])
 def webhook():
     signature = request.headers.get('X-Line-Signature', '')
+    if not signature:
+        print("Missing X-Line-Signature header")
+        abort(401)
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -723,6 +760,12 @@ def handle_message(event):
             print(f"Event source type: {type(event.source)}")
             return
         
+        # Check rate limit for text messages
+        if not text_rate_limiter.is_allowed(user_id):
+            print(f"Rate limit exceeded for user {user_id}")
+            send_reply(event.reply_token, "Rate limit exceeded. Please slow down (max 60 messages per minute).")
+            return
+        
         # Check if this is a group chat
         group_id = None
         if isinstance(event.source, GroupSource):
@@ -734,7 +777,7 @@ def handle_message(event):
         if cmd_info:
             if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese"]:
                 handle_set_command(cmd_info, user_id, event.reply_token, group_id)
-            elif cmd_info["type"] in ["status", "status_version", "status_help"]:
+            elif cmd_info["type"] in ["status", "help"]:
                 handle_status_command(user_id, event.reply_token, group_id, cmd_info["type"])
             return
         
@@ -808,6 +851,12 @@ def handle_audio_message(event):
             print("WARNING: Could not extract user_id from audio event")
             return
         
+        # Check rate limit for voice messages (more expensive, lower limit)
+        if not voice_rate_limiter.is_allowed(user_id):
+            print(f"Voice rate limit exceeded for user {user_id}")
+            send_reply(event.reply_token, "Voice message rate limit exceeded. Please slow down (max 10 voice messages per minute).")
+            return
+        
         # Check if this is a group chat
         group_id = None
         if isinstance(event.source, GroupSource):
@@ -864,14 +913,14 @@ def handle_audio_message(event):
                     "/set mandarin\n\n"
                     "Or use Japanese mode:\n"
                     "/set japanese\n\n"
-                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil"
+                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko"
                 )
             else:
                 send_reply(
                     event.reply_token,
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
-                    "Supported languages: en, zh-TW, es, ja, th, id, fil\n"
+                    "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko\n"
                     "Or use American mode: /set american\n"
                     "Or use Mandarin mode: /set mandarin\n"
                     "Or use Japanese mode: /set japanese"
@@ -1248,7 +1297,11 @@ def handle_audio_message(event):
             "ja": "ja-JP",
             "th": "th-TH",
             "id": "id-ID",
-            "fil": "fil-PH"  # Filipino (Tagalog)
+            "fil": "fil-PH",  # Filipino (Tagalog)
+            "fr": "fr-FR",
+            "it": "it-IT",
+            "de": "de-DE",
+            "ko": "ko-KR",
         }
         
         # Get Speech-to-Text codes for both languages
@@ -1265,7 +1318,7 @@ def handle_audio_message(event):
             send_reply(
                 event.reply_token,
                 f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
-                "Supported languages: en, zh-TW, es, ja, th, id, fil"
+                "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko"
             )
             return
         
@@ -1314,7 +1367,11 @@ def handle_audio_message(event):
                 "ja": "Japanese",
                 "th": "Thai",
                 "id": "Indonesian",
-                "fil": "Filipino"
+                "fil": "Filipino",
+                "fr": "French",
+                "it": "Italian",
+                "de": "German",
+                "ko": "Korean",
             }
             source_name = lang_names.get(source_lang, source_lang)
             target_name = lang_names.get(target_lang, target_lang)

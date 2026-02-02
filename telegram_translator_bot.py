@@ -4,6 +4,7 @@ import re
 import traceback
 import urllib.error
 import urllib.request
+import hmac
 from typing import Any, Dict, Optional, Union, cast
 
 from dotenv import load_dotenv
@@ -13,10 +14,12 @@ from google.cloud.firestore_v1.base_document import DocumentSnapshot
 
 from gcs_audio import download_telegram_audio, speech_to_text
 from gcs_translate import detect_and_translate
+from rate_limiter import text_rate_limiter, voice_rate_limiter
+from async_processor import async_processor
 
 load_dotenv()
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-WEBHOOK_SECRET = os.getenv('TELEGRAM_WEBHOOK_SECRET')
+WEBHOOK_SECRET_RAW = os.getenv('TELEGRAM_WEBHOOK_SECRET')
 APP_VERSION = os.getenv('APP_VERSION', 'unknown')
 
 app = Flask(__name__)
@@ -25,6 +28,15 @@ if not BOT_TOKEN:
     print("ERROR: TELEGRAM_BOT_TOKEN not set!")
     print("Please set this environment variable in your .env file")
     raise ValueError("Telegram credentials not configured")
+
+if not WEBHOOK_SECRET_RAW:
+    print("ERROR: TELEGRAM_WEBHOOK_SECRET not set!")
+    print("Please set this environment variable in your .env file")
+    print("This is required for secure webhook authentication")
+    raise ValueError("TELEGRAM_WEBHOOK_SECRET must be configured for security")
+
+# Type assertion: WEBHOOK_SECRET is guaranteed to be str after the check above
+WEBHOOK_SECRET: str = WEBHOOK_SECRET_RAW
 
 _db_client: Optional[Client] = None
 _COLLECTION_NAME = "user_settings"
@@ -127,11 +139,9 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
             return {"type": "set_mandarin"}
         elif parts[1] == 'japanese':
             return {"type": "set_japanese"}
+    if command == '/help':
+        return {"type": "help"}
     if command == '/status':
-        if len(parts) >= 2 and parts[1] == 'version':
-            return {"type": "status_version"}
-        elif len(parts) >= 2 and parts[1] == 'help':
-            return {"type": "status_help"}
         return {"type": "status"}
     return None
 
@@ -211,7 +221,10 @@ def normalize_language_code(code: str) -> str:
     code_map = {
         "en": "en", "zh-tw": "zh-TW", "zh-cn": "zh-TW", "es": "es", "ja": "ja",
         "jpn": "ja", "th": "th", "id": "id", "ind": "id", "fil": "fil",
-        "tl": "fil", "tagalog": "fil", "filipino": "fil"
+        "tl": "fil", "tagalog": "fil", "filipino": "fil",
+        "fr": "fr", "french": "fr", "it": "it", "italian": "it", "ita": "it",
+        "de": "de", "german": "de", "deu": "de", "ger": "de",
+        "ko": "ko", "korean": "ko", "kor": "ko",
     }
     return code_map.get(code_lower, code)
 
@@ -234,7 +247,7 @@ def handle_set_command(cmd_info: Dict[str, Any], chat_id: Union[int, str], user_
     elif cmd_info["type"] == "set_pair":
         source = normalize_language_code(cmd_info["source"])
         target = normalize_language_code(cmd_info["target"])
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
+        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
         if source not in supported_codes:
             send_message(chat_id, f"Invalid source language code: {cmd_info['source']}\nSupported: {', '.join(supported_codes)}")
             return
@@ -275,30 +288,30 @@ def handle_set_command(cmd_info: Dict[str, Any], chat_id: Union[int, str], user_
 
 
 def handle_status_command(chat_id: Union[int, str], thread_id: Optional[str] = None, status_type: str = "status") -> None:
-    if status_type == "status_version":
-        send_message(chat_id, "\n".join([
-            "Version Information:",
-            f"TranslatorBot App Version: {APP_VERSION}",
-            "Google Cloud API Version: 2.21.0",
-            "",
-            "Tesseract Technologies LLC, Meridian ID, USA"
-        ]))
-        return
-    if status_type == "status_help":
+    if status_type == "help":
         help_text = [
-            "Add TranslatorBot to a conversation and enable translation with following commands:",
-            "", "Commands start with /",
-            "/set on - enables translation for user",
-            "/set off - disables translation for user",
-            "/set language pair <source> <target> - sets specific language pair (e.g., /set language pair zh-tw en)",
-            "/set american - sets mode to translate all languages to American English",
-            "/set mandarin - sets mode to translate all languages to Traditional Chinese (Taiwan)",
-            "/set japanese - sets mode to translate all languages to Japanese",
+            "Add Translator Bot to a Group and enable translation with following commands:",
+            "",
+            "Commands start with /",
+            "/set american - Translate All languages to American English",
+            "/set mandarin - Translate All languages to Traditional Chinese (Taiwan)",
+            "/set japanese - Translate All languages to Japanese",
+            "/set language pair <lang1> <lang2> - sets specific language pair (e.g., /set language pair zh-tw en)",
+            "Language options for /set language pair:",
+            '   "zh-TW"  # Mandarin (we only support Traditional Chinese),',
+            '   "ja"  # Japanese, also accepts "jpn",',
+            '   "th"  # Thai,',
+            '   "id"  # Indonesian, also accepts "ind",',
+            '   "fil"  # Filipino, also accepts "filipino", "tagalog", "tl",',
+            '   "en", "fr", "de", "it", "es", "ko"  # English, French, German, Italian, Spanish, Korean',
+            "/set off - disables translation",
             "/status - returns current user settings",
-            "/status version", "/status help",
-            "", "Language options for /set language pair <source> <target>",
-            '"en", "zh-tw", "es", "ja", "th", "id", "fil" and variants.',
+            "/help - returns this help message",
             "", "Voice-to-text is only available to paid customers!",
+            "", f"Translator Bot for Telegram App. Version: {APP_VERSION}",
+            "", "Copyright 2026 Tesseract Tech. LLC, Meridian  ID, USA",
+            "Website: www.tssrct.us",
+            "", "For Translate All modes, see: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."        
         ]
         send_message(chat_id, "\n".join(help_text))
         return
@@ -321,14 +334,45 @@ def handle_status_command(chat_id: Union[int, str], thread_id: Optional[str] = N
     send_message(chat_id, "\n".join(status_lines))
 
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for liveness probe."""
+    return {'status': 'healthy', 'service': 'telegram-translator-bot', 'version': APP_VERSION}, 200
+
+@app.route('/ready', methods=['GET'])
+def ready():
+    """Readiness check endpoint - verifies dependencies are accessible."""
+    try:
+        # Check Firestore connection
+        db = _get_db()
+        # Quick connectivity check
+        db.collection('_health_check').limit(1).get()
+        
+        return {
+            'status': 'ready',
+            'service': 'telegram-translator-bot',
+            'version': APP_VERSION,
+            'checks': {
+                'firestore': 'ok',
+                'telegram_api': 'configured' if BOT_TOKEN else 'missing'
+            }
+        }, 200
+    except Exception as e:
+        return {
+            'status': 'not ready',
+            'service': 'telegram-translator-bot',
+            'error': str(e)
+        }, 503
+
 @app.route("/webhook", methods=['POST'])
 def webhook():
     body = request.get_data()
-    if WEBHOOK_SECRET:
-        secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if secret_header != WEBHOOK_SECRET:
-            print("Invalid or missing webhook secret")
-            abort(403)
+    # Verify webhook secret using constant-time comparison to prevent timing attacks
+    secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    # WEBHOOK_SECRET is guaranteed to be str (validated at startup)
+    if not secret_header or not hmac.compare_digest(secret_header, WEBHOOK_SECRET):  # type: ignore[arg-type]
+        print("Invalid or missing webhook secret")
+        abort(403)
     try:
         data = json.loads(body.decode('utf-8'))
     except Exception as e:
@@ -369,11 +413,17 @@ def handle_text_message(
     from_obj: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
+        # Check rate limit for text messages
+        if not text_rate_limiter.is_allowed(user_id):
+            print(f"Rate limit exceeded for user {user_id}")
+            send_message(chat_id, "Rate limit exceeded. Please slow down (max 60 messages per minute).")
+            return
+        
         cmd_info = parse_switch_command(message_text)
         if cmd_info:
             if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese"]:
                 handle_set_command(cmd_info, chat_id, user_id, thread_id)
-            elif cmd_info["type"] in ["status", "status_version", "status_help"]:
+            elif cmd_info["type"] in ["status", "help"]:
                 handle_status_command(chat_id, thread_id, cmd_info["type"])
             return
         if is_emoji_only(message_text):
@@ -406,6 +456,12 @@ def handle_voice_message(
     thread_id: Optional[str] = None,
 ) -> None:
     try:
+        # Check rate limit for voice messages (more expensive, lower limit)
+        if not voice_rate_limiter.is_allowed(user_id):
+            print(f"Voice rate limit exceeded for user {user_id}")
+            send_message(chat_id, "Voice message rate limit exceeded. Please slow down (max 10 voice messages per minute).")
+            return
+        
         if thread_id:
             settings = get_thread_setting(thread_id)
         else:
@@ -544,12 +600,13 @@ def handle_voice_message(
             return
         stt_language_map = {
             "en": "en-US", "zh-TW": "zh-TW", "es": "es-ES", "ja": "ja-JP",
-            "th": "th-TH", "id": "id-ID", "fil": "fil-PH"
+            "th": "th-TH", "id": "id-ID", "fil": "fil-PH",
+            "fr": "fr-FR", "it": "it-IT", "de": "de-DE", "ko": "ko-KR",
         }
         source_stt_code = stt_language_map.get(source_lang)
         target_stt_code = stt_language_map.get(target_lang)
         if not source_stt_code or not target_stt_code:
-            send_message(chat_id, f"Unsupported language(s) for voice. Supported: en, zh-TW, es, ja, th, id, fil")
+            send_message(chat_id, f"Unsupported language(s) for voice. Supported: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko")
             return
         try:
             transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code])

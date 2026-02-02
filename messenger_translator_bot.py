@@ -14,6 +14,9 @@ from google.cloud.firestore_v1.base_document import DocumentSnapshot
 
 from gcs_translate import detect_and_translate
 from gcs_audio import speech_to_text, download_messenger_audio, download_messenger_audio_from_url
+from rate_limiter import text_rate_limiter, voice_rate_limiter
+from cache_manager import profile_cache
+from async_processor import async_processor
 
 load_dotenv()
 PAGE_ACCESS_TOKEN = os.getenv('FACEBOOK_PAGE_ACCESS_TOKEN')
@@ -296,9 +299,10 @@ def get_user_display_name(user_id: str) -> Optional[str]:
     
     try:
         # Facebook Graph API endpoint for user profile
-        url = f"https://graph.facebook.com/v21.0/{user_id}?fields=first_name,last_name&access_token={PAGE_ACCESS_TOKEN}"
+        url = f"https://graph.facebook.com/v21.0/{user_id}?fields=first_name,last_name"
         
         req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {PAGE_ACCESS_TOKEN}")
         with urllib.request.urlopen(req, timeout=10) as response:
             if response.status == 200:
                 profile_data = json.loads(response.read().decode())
@@ -307,6 +311,8 @@ def get_user_display_name(user_id: str) -> Optional[str]:
                 display_name = f"{first_name} {last_name}".strip()
                 if display_name:
                     print(f"✓ Retrieved display name '{display_name}' for user {user_id}")
+                    # Cache the result
+                    profile_cache.set(user_id, display_name)
                 return display_name if display_name else None
             else:
                 print(f"WARNING: Unexpected status {response.status} when retrieving profile for user {user_id}")
@@ -415,7 +421,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         # Supported languages for voice translation
-        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
+        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
         # Check if both languages are set and supported
         if source_lang and target_lang:
             if source_lang in supported_languages and target_lang in supported_languages:
@@ -495,7 +501,7 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, thread_id: Option
         target = normalize_language_code(target_input)
         
         # Supported Google Cloud language codes (proper format)
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
+        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
         
         # Validate language codes
         if source not in supported_codes:
@@ -582,7 +588,19 @@ def normalize_language_code(code: str) -> str:
         "fil": "fil",  # Filipino
         "tl": "fil",  # Tagalog (maps to Filipino)
         "tagalog": "fil",  # Also accept tagalog
-        "filipino": "fil"  # Also accept filipino
+        "filipino": "fil",  # Also accept filipino
+        "fr": "fr",  # French
+        "french": "fr",
+        "it": "it",  # Italian
+        "italian": "it",
+        "ita": "it",
+        "de": "de",  # German
+        "german": "de",
+        "deu": "de",
+        "ger": "de",
+        "ko": "ko",  # Korean
+        "korean": "ko",
+        "kor": "ko",
     }
     return code_map.get(code_lower, code)  # Return original if not in map
 
@@ -593,10 +611,9 @@ def handle_status_command(user_id: str, thread_id: Optional[str] = None, status_
         # Display version info
         version_info = [
             "Version Information:",
-            f"TranslatorBot App Version: {APP_VERSION}",
-            "Google Cloud API Version: 2.21.0",
+            f"Translator Translator Bot App Version: {APP_VERSION}",
             "",
-            "Tesseract Technologies LLC, Meridian ID, USA"
+            "Tesseract Technology LLC, Meridian ID, USA"
         ]
         send_message(user_id, "\n".join(version_info))
         return
@@ -631,6 +648,7 @@ def handle_status_command(user_id: str, thread_id: Optional[str] = None, status_
             '"tl": "fil",  # Tagalog (maps to Filipino)',
             '"tagalog": "fil",  # Also accepts tagalog',
             '"filipino": "fil",  # Also accepts filipino',
+            '"fr": "fr", "it": "it", "de": "de", "ko": "ko",  # French, Italian, German, Korean',
             "",
             "Voice-to-text is only available to paid customers!",
             "See: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."
@@ -696,6 +714,36 @@ def verify_webhook_signature(payload: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected_hash, calculated_hash)
 
 
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for liveness probe."""
+    return {'status': 'healthy', 'service': 'messenger-translator-bot', 'version': APP_VERSION}, 200
+
+@app.route('/ready', methods=['GET'])
+def ready():
+    """Readiness check endpoint - verifies dependencies are accessible."""
+    try:
+        # Check Firestore connection
+        db = _get_db()
+        # Quick connectivity check
+        db.collection('_health_check').limit(1).get()
+        
+        return {
+            'status': 'ready',
+            'service': 'messenger-translator-bot',
+            'version': APP_VERSION,
+            'checks': {
+                'firestore': 'ok',
+                'facebook_api': 'configured' if PAGE_ACCESS_TOKEN else 'missing'
+            }
+        }, 200
+    except Exception as e:
+        return {
+            'status': 'not ready',
+            'service': 'messenger-translator-bot',
+            'error': str(e)
+        }, 503
+
 @app.route("/webhook", methods=['GET'])
 def webhook_verify():
     """Handle webhook verification (GET request from Facebook)."""
@@ -725,19 +773,20 @@ def webhook():
     try:
         data = json.loads(body.decode('utf-8'))
         
-        # Facebook sends events in entry array
+        # Process events asynchronously to avoid timeout
+        # Return 200 immediately to Facebook
         if 'object' in data and data['object'] == 'page':
             for entry in data.get('entry', []):
                 # Process messaging events
                 for event in entry.get('messaging', []):
-                    handle_messaging_event(event)
+                    async_processor.submit(handle_messaging_event, event)
         
         return 'OK', 200
         
     except Exception as e:
         print(f"ERROR in webhook handler: {e}")
         print(traceback.format_exc())
-        abort(500)
+        return 'OK', 200  # Return 200 to avoid Facebook retries on parsing errors
 
 
 def handle_messaging_event(event: Dict[str, Any]) -> None:
@@ -788,6 +837,12 @@ def handle_messaging_event(event: Dict[str, Any]) -> None:
 def handle_text_message(user_id: str, message_text: str, thread_id: Optional[str] = None) -> None:
     """Handle incoming text message."""
     try:
+        # Check rate limit for text messages
+        if not text_rate_limiter.is_allowed(user_id):
+            print(f"Rate limit exceeded for user {user_id}")
+            send_message(user_id, "Rate limit exceeded. Please slow down (max 60 messages per minute).")
+            return
+        
         # Check if message is a switch command
         cmd_info = parse_switch_command(message_text)
         if cmd_info:
@@ -846,6 +901,12 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
     - OR mode is "japanese" (translates any language to Japanese)
     """
     try:
+        # Check rate limit for voice messages (more expensive, lower limit)
+        if not voice_rate_limiter.is_allowed(user_id):
+            print(f"Voice rate limit exceeded for user {user_id}")
+            send_message(user_id, "Voice message rate limit exceeded. Please slow down (max 10 voice messages per minute).")
+            return
+        
         # Get user/thread settings
         print(f"DEBUG: handle_audio_message - user_id={user_id}, thread_id={thread_id}")
         if thread_id:
@@ -899,14 +960,14 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
                     "/set mandarin\n\n"
                     "Or use Japanese mode:\n"
                     "/set japanese\n\n"
-                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil"
+                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko"
                 )
             else:
                 send_message(
                     user_id,
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
-                    "Supported languages: en, zh-TW, es, ja, th, id, fil\n"
+                    "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko\n"
                     "Or use American mode: /set american\n"
                     "Or use Mandarin mode: /set mandarin\n"
                     "Or use Japanese mode: /set japanese"
@@ -1275,7 +1336,11 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
             "ja": "ja-JP",
             "th": "th-TH",
             "id": "id-ID",
-            "fil": "fil-PH"  # Filipino (Tagalog)
+            "fil": "fil-PH",  # Filipino (Tagalog)
+            "fr": "fr-FR",
+            "it": "it-IT",
+            "de": "de-DE",
+            "ko": "ko-KR",
         }
         
         # Get Speech-to-Text codes for both languages
@@ -1292,7 +1357,7 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
             send_message(
                 user_id,
                 f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
-                "Supported languages: en, zh-TW, es, ja, th, id, fil"
+                "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko"
             )
             return
         
@@ -1341,7 +1406,11 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
                 "ja": "Japanese",
                 "th": "Thai",
                 "id": "Indonesian",
-                "fil": "Filipino"
+                "fil": "Filipino",
+                "fr": "French",
+                "it": "Italian",
+                "de": "German",
+                "ko": "Korean",
             }
             source_name = lang_names.get(source_lang, source_lang)
             target_name = lang_names.get(target_lang, target_lang)
