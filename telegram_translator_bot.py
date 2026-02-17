@@ -194,7 +194,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     if mode == "pair":
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
-        supported = ["en", "zh-TW", "es", "ja", "th", "id", "fil"]
+        supported = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "vi"]
         if source_lang and target_lang and source_lang in supported and target_lang in supported:
             return True
     elif mode in ("american", "mandarin", "japanese"):
@@ -225,6 +225,7 @@ def normalize_language_code(code: str) -> str:
         "fr": "fr", "french": "fr", "it": "it", "italian": "it", "ita": "it",
         "de": "de", "german": "de", "deu": "de", "ger": "de",
         "ko": "ko", "korean": "ko", "kor": "ko",
+        "vi": "vi", "vie": "vi", "vietnamese": "vi",
     }
     return code_map.get(code_lower, code)
 
@@ -247,7 +248,7 @@ def handle_set_command(cmd_info: Dict[str, Any], chat_id: Union[int, str], user_
     elif cmd_info["type"] == "set_pair":
         source = normalize_language_code(cmd_info["source"])
         target = normalize_language_code(cmd_info["target"])
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
+        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         if source not in supported_codes:
             send_message(chat_id, f"Invalid source language code: {cmd_info['source']}\nSupported: {', '.join(supported_codes)}")
             return
@@ -303,6 +304,7 @@ def handle_status_command(chat_id: Union[int, str], thread_id: Optional[str] = N
             '   "th"  # Thai,',
             '   "id"  # Indonesian, also accepts "ind",',
             '   "fil"  # Filipino, also accepts "filipino", "tagalog", "tl",',
+            '   "vi"  # Vietnamese, also accepts "vie", "vietnamese",',
             '   "en", "fr", "de", "it", "es", "ko"  # English, French, German, Italian, Spanish, Korean',
             "/set off - disables translation",
             "/status - returns current user settings",
@@ -602,11 +604,12 @@ def handle_voice_message(
             "en": "en-US", "zh-TW": "zh-TW", "es": "es-ES", "ja": "ja-JP",
             "th": "th-TH", "id": "id-ID", "fil": "fil-PH",
             "fr": "fr-FR", "it": "it-IT", "de": "de-DE", "ko": "ko-KR",
+            "vi": "vi-VN",
         }
         source_stt_code = stt_language_map.get(source_lang)
         target_stt_code = stt_language_map.get(target_lang)
         if not source_stt_code or not target_stt_code:
-            send_message(chat_id, f"Unsupported language(s) for voice. Supported: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko")
+            send_message(chat_id, f"Unsupported language(s) for voice. Supported: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi")
             return
         try:
             transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code])

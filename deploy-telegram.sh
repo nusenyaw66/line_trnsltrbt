@@ -62,6 +62,10 @@ if [ "$gcs_update" = true ]; then
     echo -e "${GREEN}Setting GCP project to $PROJECT_ID...${NC}"
     gcloud config set project "$PROJECT_ID"
 
+    # Set application-default quota project
+    echo -e "${GREEN}Setting application-default quota project to $PROJECT_ID...${NC}"
+    gcloud auth application-default set-quota-project "$PROJECT_ID"
+
     # Enable required APIs
     echo -e "${GREEN}Enabling required APIs...${NC}"
     gcloud services enable cloudbuild.googleapis.com \
@@ -189,6 +193,11 @@ if [ "$gcs_update" = true ]; then
     fi
 else
     echo -e "${YELLOW}Skipping API, Service Account, Secrets update (set gcs_update=true to update)${NC}"
+    # Still set project and quota project even if skipping updates
+    echo -e "${GREEN}Setting GCP project to $PROJECT_ID...${NC}"
+    gcloud config set project "$PROJECT_ID"
+    echo -e "${GREEN}Setting application-default quota project to $PROJECT_ID...${NC}"
+    gcloud auth application-default set-quota-project "$PROJECT_ID"
 fi
 
 # Verify required secret exists before deployment

@@ -55,3 +55,5 @@ v0.8 added FB Messenger branch
 v0.9 Added Filipino (Tagalog) support to the translation bot.
 
 v0.22 added French, Italian, Germany and pre-production update.
+
+v0.39 added Vietnamese

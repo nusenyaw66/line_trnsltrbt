@@ -429,7 +429,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         # Supported languages for voice translation
-        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
+        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         # Check if both languages are set and supported
         if source_lang and target_lang:
             if source_lang in supported_languages and target_lang in supported_languages:
@@ -503,6 +503,9 @@ def normalize_language_code(code: str) -> str:
         "ko": "ko",  # Korean
         "korean": "ko",
         "kor": "ko",
+        "vi": "vi",  # Vietnamese
+        "vie": "vi",
+        "vietnamese": "vi",
     }
     return code_map.get(code_lower, code)  # Return original if not in map
 
@@ -536,7 +539,7 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str,
         target = normalize_language_code(target_input)
         
         # Supported Google Cloud language codes (proper format)
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko"]
+        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         
         # Validate language codes
         if source not in supported_codes:
@@ -624,6 +627,7 @@ def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str
             '   "th"  # Thai,',
             '   "id"  # Indonesian, also accepts "ind",',
             '   "fil"  # Filipino, also accepts "filipino", "tagalog", "tl"',
+            '   "vi"  # Vietnamese, also accepts "vie", "vietnamese",',
             '   "en", "fr", "de", "it", "es", "ko"  # English, French, German, Italian, Spanish, Korean',
             "/set off - disables translation",
             "/status - returns current user settings",
@@ -913,14 +917,14 @@ def handle_audio_message(event):
                     "/set mandarin\n\n"
                     "Or use Japanese mode:\n"
                     "/set japanese\n\n"
-                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko"
+                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil, vi, fr, it, de, ko"
                 )
             else:
                 send_reply(
                     event.reply_token,
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
-                    "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko\n"
+                    "Supported languages: en, zh-TW, es, ja, th, id, fil, vi, fr, it, de, ko\n"
                     "Or use American mode: /set american\n"
                     "Or use Mandarin mode: /set mandarin\n"
                     "Or use Japanese mode: /set japanese"
@@ -1302,6 +1306,7 @@ def handle_audio_message(event):
             "it": "it-IT",
             "de": "de-DE",
             "ko": "ko-KR",
+            "vi": "vi-VN",
         }
         
         # Get Speech-to-Text codes for both languages
@@ -1318,7 +1323,7 @@ def handle_audio_message(event):
             send_reply(
                 event.reply_token,
                 f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
-                "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko"
+                "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi"
             )
             return
         
@@ -1372,6 +1377,7 @@ def handle_audio_message(event):
                 "it": "Italian",
                 "de": "German",
                 "ko": "Korean",
+                "vi": "Vietnamese",
             }
             source_name = lang_names.get(source_lang, source_lang)
             target_name = lang_names.get(target_lang, target_lang)
