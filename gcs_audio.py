@@ -7,6 +7,10 @@ import os
 import json
 
 
+class PremiumRequiredError(Exception):
+    """Raised when a premium-only audio feature is used without access."""
+
+
 # Speech-to-Text client (initialized lazily)
 _speech_client: Optional[Any] = None
 
@@ -44,7 +48,13 @@ def _get_tts_client() -> Any:
     return _tts_client
 
 
-def speech_to_text(audio_content: bytes, language_code: str, alternative_language_codes: Optional[list[str]] = None) -> str:
+def speech_to_text(
+    audio_content: bytes,
+    language_code: str,
+    alternative_language_codes: Optional[list[str]] = None,
+    *,
+    premium_access: bool = False,
+) -> str:
     """
     Convert audio content to text using Google Cloud Speech-to-Text with intelligent encoding detection.
     
@@ -64,8 +74,12 @@ def speech_to_text(audio_content: bytes, language_code: str, alternative_languag
         Transcribed text
     
     Raises:
+        PremiumRequiredError: If premium access is not granted
         Exception: If speech recognition fails
     """
+    if not premium_access:
+        raise PremiumRequiredError("Premium subscription required for speech-to-text")
+
     try:
         client = _get_speech_client()
         
@@ -186,7 +200,7 @@ def speech_to_text(audio_content: bytes, language_code: str, alternative_languag
         raise
 
 
-def text_to_speech(text: str, language_code: str) -> bytes:
+def text_to_speech(text: str, language_code: str, *, premium_access: bool = False) -> bytes:
     """
     Convert text to speech using Google Cloud Text-to-Speech.
     
@@ -198,8 +212,12 @@ def text_to_speech(text: str, language_code: str) -> bytes:
         Audio content as bytes (MP3 format)
     
     Raises:
+        PremiumRequiredError: If premium access is not granted
         Exception: If TTS synthesis fails
     """
+    if not premium_access:
+        raise PremiumRequiredError("Premium subscription required for text-to-speech")
+
     # Select appropriate voice based on language
     # Using WaveNet voices for better quality
     voice_map = {

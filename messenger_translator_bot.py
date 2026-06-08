@@ -53,7 +53,6 @@ AMERICAN_MODE_LANGUAGES = [
     "pt-BR",      # Portuguese (Brazil)
     "es-MX",      # Spanish (Mexico)
     "pt-PT",      # Portuguese (Portugal)
-    "zh-CN",      # Chinese (Simplified)
     "ru-RU",      # Russian
     "ar-XA",      # Arabic
     "hi-IN",      # Hindi
@@ -578,7 +577,10 @@ def normalize_language_code(code: str) -> str:
     code_map = {
         "en": "en",
         "zh-tw": "zh-TW",
-        "zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)
+        "zh-cn": "zh-TW",
+        "zh-hans": "zh-TW",
+        "zh-hant": "zh-TW",
+        "tw": "zh-TW",
         "es": "es",
         "ja": "ja",
         "jpn": "ja",  # Also accept jpn
@@ -641,6 +643,7 @@ def handle_status_command(user_id: str, thread_id: Optional[str] = None, status_
             '"en": "en",',
             '"zh-tw": "zh-TW",',
             '"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)',
+            '"tw": "zh-TW",  # Also accept tw for Traditional Chinese (Taiwan)',
             '"es": "es",',
             '"ja": "ja",',
             '"jpn": "ja",  # Also accepts jpn',

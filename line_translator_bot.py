@@ -26,10 +26,29 @@ from typing import Dict, Any, Optional, cast
 from google.cloud.firestore_v1 import Client
 from google.cloud.firestore_v1.base_document import DocumentSnapshot
 
-from gcs_translate import detect_and_translate
+from gcs_translate import detect_and_translate, PremiumRequiredError as TranslatePremiumRequiredError
 from gcs_audio import speech_to_text, download_line_audio
 from rate_limiter import text_rate_limiter, voice_rate_limiter
 from cache_manager import profile_cache
+from subscription_access import has_premium_access as _has_premium_access_from_settings
+from premium_gating import requires_premium_for_translation, requires_premium_for_voice
+from i18n import (
+    detect_ui_language,
+    get_lang_display_name,
+    get_localized_help_lines,
+    get_localized_status_lines,
+    get_localized_subscription_status_lines,
+    get_text,
+    normalize_lang,
+    supported_lang_codes,
+)
+from subscription_commands import build_activate_group_updates, build_subscribe_message_key
+from firestore_client import (
+    get_group_activation as _get_group_activation_from_store,
+    get_user_subscription as _get_user_subscription_from_store,
+    save_group_activation,
+    save_user_subscription,
+)
 
 load_dotenv()
 CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
@@ -53,6 +72,79 @@ handler = WebhookHandler(CHANNEL_SECRET)
 _db_client: Optional[Client] = None
 _COLLECTION_NAME = "user_settings"
 
+
+def _user_settings_json_path() -> str:
+    return os.getenv(
+        "USER_SETTINGS_JSON_PATH",
+        os.path.join(os.path.dirname(__file__), "user_settings.json"),
+    )
+
+
+def _default_user_settings() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "mode": "pair",
+        "source_lang": None,
+        "target_lang": None,
+        "ui_lang": None,
+        "subscribed": False,
+        "subscription_expires_at": None,
+        "plan_type": None,
+        "subscription_activated_at": None,
+    }
+
+
+def _default_group_settings() -> Dict[str, Any]:
+    return {
+        "enabled": False,
+        "mode": "pair",
+        "source_lang": None,
+        "target_lang": None,
+        "ui_lang": None,
+        "subscription_activated_by_user_id": None,
+        "subscription_activated_at": None,
+        "subscription_expires_at": None,
+    }
+
+
+def _load_json_settings_store() -> Dict[str, Any]:
+    try:
+        with open(_user_settings_json_path(), "r", encoding="utf-8") as settings_file:
+            data = json.load(settings_file)
+            return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        print(f"ERROR loading settings from JSON fallback: {e}")
+        return {}
+
+
+def _save_json_settings_store(store: Dict[str, Any]) -> None:
+    try:
+        with open(_user_settings_json_path(), "w", encoding="utf-8") as settings_file:
+            json.dump(store, settings_file, indent=2, ensure_ascii=False)
+            settings_file.write("\n")
+    except Exception as e:
+        print(f"ERROR saving settings to JSON fallback: {e}")
+        raise
+
+
+def _merge_settings(defaults: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = defaults.copy()
+    merged.update(data or {})
+    return merged
+
+
+def _get_settings_from_json(doc_id: str, defaults: Dict[str, Any]) -> Dict[str, Any]:
+    store = _load_json_settings_store()
+    return _merge_settings(defaults, store.get(doc_id))
+
+
+def _save_settings_to_json(doc_id: str, settings: Dict[str, Any]) -> None:
+    store = _load_json_settings_store()
+    store[doc_id] = settings
+    _save_json_settings_store(store)
+
 # Common languages for american mode (prioritized list)
 # Google Cloud Speech-to-Text language codes for multi-language recognition
 # These are used when mode is "american" to detect any language and translate to English
@@ -68,7 +160,6 @@ AMERICAN_MODE_LANGUAGES = [
     "pt-BR",      # Portuguese (Brazil)
     "es-MX",      # Spanish (Mexico)
     "pt-PT",      # Portuguese (Portugal)
-    "zh-CN",      # Chinese (Simplified)
     "ru-RU",      # Russian
     "ar-XA",      # Arabic
     "hi-IN",      # Hindi
@@ -103,6 +194,7 @@ def get_user_setting(user_id: str) -> Dict[str, Any]:
     
     Each user's settings are stored in a separate Firestore document,
     ensuring complete isolation between different LINE users.
+    Falls back to local JSON when Firestore is unavailable.
     
     Args:
         user_id: Unique LINE user ID (used as Firestore document ID)
@@ -110,6 +202,7 @@ def get_user_setting(user_id: str) -> Dict[str, Any]:
     Returns:
         User settings dictionary with defaults if not found
     """
+    defaults = _default_user_settings()
     try:
         db = _get_db()
         # Each user_id gets its own document - complete isolation
@@ -119,33 +212,11 @@ def get_user_setting(user_id: str) -> Dict[str, Any]:
         doc = cast(DocumentSnapshot, doc_ref.get())
         
         if doc.exists:
-            data = doc.to_dict()
-            # Ensure all fields are present
-            default_settings = {
-                "enabled": False,
-                "mode": "pair",
-                "source_lang": None,
-                "target_lang": None
-            }
-            default_settings.update(data or {})
-            return default_settings
-        else:
-            # Return defaults for new users
-            return {
-                "enabled": False,
-                "mode": "pair",
-                "source_lang": None,
-                "target_lang": None
-            }
+            return _merge_settings(defaults, doc.to_dict())
+        return defaults.copy()
     except Exception as e:
         print(f"ERROR loading user settings from Firestore: {e}")
-        # Return defaults on error
-        return {
-            "enabled": False,
-            "mode": "pair",
-            "source_lang": None,
-            "target_lang": None
-        }
+        return _get_settings_from_json(user_id, defaults)
 
 
 def update_user_setting(user_id: str, updates: Dict[str, Any]) -> None:
@@ -153,30 +224,45 @@ def update_user_setting(user_id: str, updates: Dict[str, Any]) -> None:
     Update user settings in Firestore.
     
     Updates are isolated to the specific user_id - no other users' data is affected.
+    Also persists to local JSON fallback for development/resilience.
     
     Args:
         user_id: Unique LINE user ID (used as Firestore document ID)
         updates: Dictionary of settings to update
     """
+    current = get_user_setting(user_id)
+    current.update(updates)
+
+    firestore_error: Optional[Exception] = None
     try:
         db = _get_db()
         # Isolated document per user - updates only affect this user
         doc_ref = db.collection(_COLLECTION_NAME).document(user_id)
-        
-        # Get current settings or use defaults
-        current = get_user_setting(user_id)
-        current.update(updates)
-        
-        # Save to Firestore
         doc_ref.set(current)
     except Exception as e:
+        firestore_error = e
         print(f"ERROR saving user settings to Firestore: {e}")
+
+    try:
+        _save_settings_to_json(user_id, current)
+    except Exception:
+        if firestore_error is not None:
+            raise firestore_error
         raise
+
+    if firestore_error is not None:
+        return
+
+
+def save_user_setting(user_id: str, updates: Dict[str, Any]) -> None:
+    """Save user settings updates (alias for update_user_setting)."""
+    update_user_setting(user_id, updates)
 
 
 def get_group_setting(group_id: str) -> Dict[str, Any]:
     """
     Get group settings from Firestore, returning defaults if not found.
+    Falls back to local JSON when Firestore is unavailable.
     
     Args:
         group_id: Unique LINE group ID
@@ -184,62 +270,116 @@ def get_group_setting(group_id: str) -> Dict[str, Any]:
     Returns:
         Group settings dictionary with defaults if not found
     """
+    defaults = _default_group_settings()
+    doc_id = f"group:{group_id}"
     try:
         db = _get_db()
-        # Use "group:{group_id}" as document ID to distinguish from user settings
-        doc_id = f"group:{group_id}"
         doc_ref = db.collection(_COLLECTION_NAME).document(doc_id)
         doc = cast(DocumentSnapshot, doc_ref.get())
         
         if doc.exists:
-            data = doc.to_dict()
-            default_settings = {
-                "enabled": False,
-                "mode": "pair",
-                "source_lang": None,
-                "target_lang": None
-            }
-            default_settings.update(data or {})
-            return default_settings
-        else:
-            return {
-                "enabled": False,
-                "mode": "pair",
-                "source_lang": None,
-                "target_lang": None
-            }
+            return _merge_settings(defaults, doc.to_dict())
+        return defaults.copy()
     except Exception as e:
         print(f"ERROR loading group settings from Firestore: {e}")
-        return {
-            "enabled": False,
-            "mode": "pair",
-            "source_lang": None,
-            "target_lang": None
-        }
+        return _get_settings_from_json(doc_id, defaults)
 
 
 def update_group_setting(group_id: str, updates: Dict[str, Any]) -> None:
     """
     Update group settings in Firestore.
+    Also persists to local JSON fallback for development/resilience.
     
     Args:
         group_id: Unique LINE group ID
         updates: Dictionary of settings to update
     """
+    doc_id = f"group:{group_id}"
+    current = get_group_setting(group_id)
+    current.update(updates)
+
+    firestore_error: Optional[Exception] = None
     try:
         db = _get_db()
-        doc_id = f"group:{group_id}"
         doc_ref = db.collection(_COLLECTION_NAME).document(doc_id)
-        
-        # Get current settings or use defaults
-        current = get_group_setting(group_id)
-        current.update(updates)
-        
-        # Save to Firestore
         doc_ref.set(current)
     except Exception as e:
+        firestore_error = e
         print(f"ERROR saving group settings to Firestore: {e}")
+
+    try:
+        _save_settings_to_json(doc_id, current)
+    except Exception:
+        if firestore_error is not None:
+            raise firestore_error
         raise
+
+    if firestore_error is not None:
+        return
+
+
+def save_group_setting(group_id: str, updates: Dict[str, Any]) -> None:
+    """Save group settings updates (alias for update_group_setting)."""
+    update_group_setting(group_id, updates)
+
+
+def _has_subscription_data(subscription: Dict[str, Any]) -> bool:
+    return bool(subscription.get("subscribed")) or subscription.get("plan_type") is not None
+
+
+def _has_group_activation_data(activation: Dict[str, Any]) -> bool:
+    return activation.get("subscription_activated_by_user_id") is not None
+
+
+def _legacy_user_subscription(user_id: str) -> Dict[str, Any]:
+    settings = get_user_setting(user_id)
+    return {
+        "subscribed": bool(settings.get("subscribed", False)),
+        "subscription_expires_at": settings.get("subscription_expires_at"),
+        "plan_type": settings.get("plan_type"),
+        "subscription_activated_at": settings.get("subscription_activated_at"),
+    }
+
+
+def _legacy_group_activation(group_id: str) -> Dict[str, Any]:
+    settings = get_group_setting(group_id)
+    return {
+        "subscription_activated_by_user_id": settings.get("subscription_activated_by_user_id"),
+        "subscription_activated_at": settings.get("subscription_activated_at"),
+        "subscription_expires_at": settings.get("subscription_expires_at"),
+    }
+
+
+def get_user_subscription(user_id: str) -> Dict[str, Any]:
+    """Load personal subscription from dedicated store, with legacy user_settings fallback."""
+    subscription = _get_user_subscription_from_store(user_id)
+    if not _has_subscription_data(subscription):
+        legacy = _legacy_user_subscription(user_id)
+        if _has_subscription_data(legacy):
+            return legacy
+    return subscription
+
+
+def get_group_subscription(group_id: str) -> Dict[str, Any]:
+    """Load group activation from dedicated store, with legacy group settings fallback."""
+    activation = _get_group_activation_from_store(group_id)
+    if not _has_group_activation_data(activation):
+        legacy = _legacy_group_activation(group_id)
+        if _has_group_activation_data(legacy):
+            return legacy
+    return activation
+
+
+def has_premium_access(user_id: str, group_id: Optional[str] = None) -> bool:
+    """Return True when the user has active personal or group premium access."""
+    user_settings = get_user_subscription(user_id)
+    group_settings = get_group_subscription(group_id) if group_id else None
+    return _has_premium_access_from_settings(
+        user_id,
+        user_settings,
+        group_id=group_id,
+        group_settings=group_settings,
+    )
 
 
 def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
@@ -262,10 +402,10 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
         # /set off
         elif parts[1] == 'off':
             return {"type": "set_off"}
-        # /set language pair <source> <target>
-        elif len(parts) >= 5 and parts[1] == 'language' and parts[2] == 'pair':
-            source = parts[3]
-            target = parts[4]
+        # /set pair <source> <target>
+        elif len(parts) >= 4 and parts[1] == 'pair':
+            source = parts[2]
+            target = parts[3]
             return {"type": "set_pair", "source": source, "target": target}
         # /set american
         elif parts[1] == 'american':
@@ -276,14 +416,31 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
         # /set japanese
         elif parts[1] == 'japanese':
             return {"type": "set_japanese"}
-    
+        # /set lang <code>
+        elif parts[1] == 'lang' and len(parts) >= 3:
+            return {"type": "set_lang", "code": parts[2]}
+
+    # /lang <code> (shorthand for /set lang)
+    if command == '/lang' and len(parts) >= 2:
+        return {"type": "set_lang", "code": parts[1]}
+
+    # /subscribe
+    if command == '/subscribe':
+        return {"type": "subscribe"}
+
+    # /activate group
+    if command == '/activate' and len(parts) >= 2 and parts[1] == 'group':
+        return {"type": "activate_group"}
+
     # /help
     if command == '/help':
         return {"type": "help"}
     # /status
     if command == '/status':
+        if len(parts) >= 2 and parts[1] == 'subscription':
+            return {"type": "status_subscription"}
         return {"type": "status"}
-    
+
     return None
 
 
@@ -453,24 +610,37 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
 # Audio upload functions removed - no longer needed
 # Voice translation now sends text messages instead of audio messages
 
+def _resolve_ui_lang(user_id: str, group_id: Optional[str] = None) -> str:
+    """Resolve the effective UI language for a user/group based on stored settings."""
+    settings = get_group_setting(group_id) if group_id else get_user_setting(user_id)
+    return detect_ui_language(
+        user_id=user_id,
+        group_id=group_id,
+        ui_lang=settings.get("ui_lang"),
+        target_lang=settings.get("target_lang"),
+    )
+
+
 def handle_on_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /on translate command."""
+    ui_lang = _resolve_ui_lang(user_id, group_id)
     if group_id:
         update_group_setting(group_id, {"enabled": True})
-        send_reply(reply_token, "Translation enabled for this group ✓")
+        send_reply(reply_token, get_text("translation_enabled_group", ui_lang))
     else:
         update_user_setting(user_id, {"enabled": True})
-        send_reply(reply_token, "Translation enabled ✓")
+        send_reply(reply_token, get_text("translation_enabled", ui_lang))
 
 
 def handle_off_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /off translate command."""
+    ui_lang = _resolve_ui_lang(user_id, group_id)
     if group_id:
         update_group_setting(group_id, {"enabled": False})
-        send_reply(reply_token, "Translation disabled for this group ✓")
+        send_reply(reply_token, get_text("translation_disabled_group", ui_lang))
     else:
         update_user_setting(user_id, {"enabled": False})
-        send_reply(reply_token, "Translation disabled ✓")
+        send_reply(reply_token, get_text("translation_disabled", ui_lang))
 
 
 def normalize_language_code(code: str) -> str:
@@ -480,7 +650,10 @@ def normalize_language_code(code: str) -> str:
     code_map = {
         "en": "en",
         "zh-tw": "zh-TW",
-        "zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)
+        "zh-cn": "zh-TW",
+        "zh-hans": "zh-TW",
+        "zh-hant": "zh-TW",
+        "tw": "zh-TW",
         "es": "es",
         "ja": "ja",
         "jpn": "ja",  # Also accept jpn
@@ -512,157 +685,215 @@ def normalize_language_code(code: str) -> str:
 
 def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
     """Handle /set commands."""
+    ui_lang = _resolve_ui_lang(user_id, group_id)
+
     if cmd_info["type"] == "set_on":
-        # /set on - enable translation
         if group_id:
             update_group_setting(group_id, {"enabled": True})
-            send_reply(reply_token, "Translation enabled for this group ✓")
+            send_reply(reply_token, get_text("translation_enabled_group", ui_lang))
         else:
             update_user_setting(user_id, {"enabled": True})
-            send_reply(reply_token, "Translation enabled ✓")
-    
+            send_reply(reply_token, get_text("translation_enabled", ui_lang))
+
     elif cmd_info["type"] == "set_off":
-        # /set off - disable translation
         if group_id:
             update_group_setting(group_id, {"enabled": False})
-            send_reply(reply_token, "Translation disabled for this group ✓")
+            send_reply(reply_token, get_text("translation_disabled_group", ui_lang))
         else:
             update_user_setting(user_id, {"enabled": False})
-            send_reply(reply_token, "Translation disabled ✓")
-    
+            send_reply(reply_token, get_text("translation_disabled", ui_lang))
+
     elif cmd_info["type"] == "set_pair":
         source_input = cmd_info["source"]
         target_input = cmd_info["target"]
-        
-        # Normalize to proper Google Cloud format (case-insensitive)
+
         source = normalize_language_code(source_input)
         target = normalize_language_code(target_input)
-        
-        # Supported Google Cloud language codes (proper format)
+
         supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
-        
-        # Validate language codes
+
         if source not in supported_codes:
             supported = ", ".join(supported_codes)
-            send_reply(reply_token, f"Invalid source language code: {source_input}\nSupported: {supported}")
+            send_reply(
+                reply_token,
+                get_text("err_invalid_source", ui_lang, code=source_input, supported=supported),
+            )
             return
-        
+
         if target not in supported_codes:
             supported = ", ".join(supported_codes)
-            send_reply(reply_token, f"Invalid target language code: {target_input}\nSupported: {supported}")
+            send_reply(
+                reply_token,
+                get_text("err_invalid_target", ui_lang, code=target_input, supported=supported),
+            )
             return
-        
-        # Use Google Cloud codes directly (now properly normalized)
+
         settings_update = {
             "enabled": True,
             "mode": "pair",
             "source_lang": source,
-            "target_lang": target
+            "target_lang": target,
         }
         if group_id:
             update_group_setting(group_id, settings_update)
-            send_reply(reply_token, f"Language pair set for this group: {source} → {target} ✓")
+            send_reply(
+                reply_token,
+                get_text("pair_set_group", ui_lang, source=source, target=target),
+            )
         else:
             update_user_setting(user_id, settings_update)
-            send_reply(reply_token, f"Language pair set: {source} → {target} ✓")
-    
+            send_reply(
+                reply_token,
+                get_text("pair_set", ui_lang, source=source, target=target),
+            )
+
     elif cmd_info["type"] == "set_american":
         settings_update = {
             "enabled": True,
             "mode": "american",
             "source_lang": None,
-            "target_lang": "en-US"
+            "target_lang": "en-US",
         }
         if group_id:
             update_group_setting(group_id, settings_update)
-            send_reply(reply_token, "American mode enabled for this group ✓\nAll detected languages will be translated to American English.")
+            send_reply(reply_token, get_text("american_enabled_group", ui_lang))
         else:
             update_user_setting(user_id, settings_update)
-            send_reply(reply_token, "American mode enabled ✓\nAll detected languages will be translated to American English.")
-    
+            send_reply(reply_token, get_text("american_enabled", ui_lang))
+
     elif cmd_info["type"] == "set_mandarin":
         settings_update = {
             "enabled": True,
             "mode": "mandarin",
             "source_lang": None,
-            "target_lang": "zh-TW"
+            "target_lang": "zh-TW",
         }
         if group_id:
             update_group_setting(group_id, settings_update)
-            send_reply(reply_token, "Mandarin mode enabled for this group ✓\nAll detected languages will be translated to Traditional Chinese (Taiwan).")
+            send_reply(reply_token, get_text("mandarin_enabled_group", ui_lang))
         else:
             update_user_setting(user_id, settings_update)
-            send_reply(reply_token, "Mandarin mode enabled ✓\nAll detected languages will be translated to Traditional Chinese (Taiwan).")
-    
+            send_reply(reply_token, get_text("mandarin_enabled", ui_lang))
+
     elif cmd_info["type"] == "set_japanese":
         settings_update = {
             "enabled": True,
             "mode": "japanese",
             "source_lang": None,
-            "target_lang": "ja"
+            "target_lang": "ja",
         }
         if group_id:
             update_group_setting(group_id, settings_update)
-            send_reply(reply_token, "Japanese mode enabled for this group ✓\nAll detected languages will be translated to Japanese.")
+            send_reply(reply_token, get_text("japanese_enabled_group", ui_lang))
         else:
             update_user_setting(user_id, settings_update)
-            send_reply(reply_token, "Japanese mode enabled ✓\nAll detected languages will be translated to Japanese.")
+            send_reply(reply_token, get_text("japanese_enabled", ui_lang))
+
+    elif cmd_info["type"] == "set_lang":
+        handle_set_lang_command(cmd_info["code"], user_id, reply_token, group_id)
+
+
+def handle_set_lang_command(code: str, user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
+    """Handle /lang <code> and /set lang <code>.
+
+    Validates the requested UI language code, persists it on user or group
+    settings, and replies in the *new* language so the change is immediately
+    visible.
+    """
+    canonical = normalize_lang(code)
+    if not canonical:
+        # Reply in the user's current UI lang (best-effort) so the error itself
+        # is still understandable.
+        current_ui = _resolve_ui_lang(user_id, group_id)
+        send_reply(
+            reply_token,
+            get_text("err_unknown_ui_lang", current_ui, code=code),
+        )
+        return
+
+    if group_id:
+        update_group_setting(group_id, {"ui_lang": canonical})
+        msg_key = "lang_set_group"
+    else:
+        update_user_setting(user_id, {"ui_lang": canonical})
+        msg_key = "lang_set"
+
+    # Reply in the newly-selected language so the user immediately sees it.
+    send_reply(
+        reply_token,
+        get_text(msg_key, canonical, lang_name=get_lang_display_name(canonical, canonical)),
+    )
+
+
+def handle_subscribe_command(user_id: str, reply_token: str, group_id: Optional[str] = None) -> None:
+    """Handle /subscribe — show subscription info or active status."""
+    ui_lang = _resolve_ui_lang(user_id, group_id)
+    user_subscription = get_user_subscription(user_id)
+    message_key, kwargs = build_subscribe_message_key(user_id, user_subscription)
+    send_reply(reply_token, get_text(message_key, ui_lang, **kwargs))
+
+
+def handle_activate_group_command(
+    user_id: str,
+    reply_token: str,
+    group_id: Optional[str] = None,
+) -> None:
+    """Handle /activate group — apply personal subscription to the current group."""
+    ui_lang = _resolve_ui_lang(user_id, group_id)
+    user_subscription = get_user_subscription(user_id)
+    result = build_activate_group_updates(user_id, user_subscription, group_id)
+    if result.ok and result.group_updates is not None and group_id:
+        save_group_activation(group_id, result.group_updates)
+    send_reply(reply_token, get_text(result.message_key, ui_lang, **result.message_kwargs))
+
+
+def handle_status_subscription_command(
+    user_id: str,
+    reply_token: str,
+    group_id: Optional[str] = None,
+) -> None:
+    """Handle /status subscription — show personal and group subscription status."""
+    ui_lang = _resolve_ui_lang(user_id, group_id)
+    user_subscription = get_user_subscription(user_id)
+    group_subscription = get_group_subscription(group_id) if group_id else None
+    status_lines = get_localized_subscription_status_lines(
+        user_settings=user_subscription,
+        lang=ui_lang,
+        user_id=user_id,
+        group_settings=group_subscription,
+        is_group=bool(group_id),
+    )
+    send_reply(reply_token, "\n".join(status_lines))
 
 
 def handle_status_command(user_id: str, reply_token: str, group_id: Optional[str] = None, status_type: str = "status") -> None:
-    """Handle /status command."""
-    if status_type == "help":
-        # Display help information
-        help_text = [
-            "Add Translator Bot to a Group chat and enable translation with following commands:",
-            "",
-            "Commands start with /",
-            "/set american - Translate All languages to American English",
-            "/set mandarin - Translate All languages to Traditional Chinese (Taiwan)",
-            "/set japanese - Translate All languages to Japanese",
-            "/set language pair <lang1> <lang2> - sets specific language pair (e.g., /set language pair zh-tw en)",
-            "Language options for /set language pair:",
-            '   "zh-TW"  # Mandarin (we only support Traditional Chinese),',
-            '   "ja"  # Japanese, also accepts "jpn",',
-            '   "th"  # Thai,',
-            '   "id"  # Indonesian, also accepts "ind",',
-            '   "fil"  # Filipino, also accepts "filipino", "tagalog", "tl"',
-            '   "vi"  # Vietnamese, also accepts "vie", "vietnamese",',
-            '   "en", "fr", "de", "it", "es", "ko"  # English, French, German, Italian, Spanish, Korean',
-            "/set off - disables translation",
-            "/status - returns current user settings",
-            "/help - returns this help message",
-            "", "Voice-to-text is only available to paid customers!",
-            "", f"Translator Bot for Line App. Version: {APP_VERSION}",
-            "", "Copyright 2026 Tesseract Tech. LLC, Meridian  ID, USA",
-            "Website: www.tssrct.us",
-            "", "For Tranlate All modes, see: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."   
-        ]
-        send_reply(reply_token, "\n".join(help_text))
-        return
-    
-    # Regular status command
+    """Handle /status and /help commands (localized)."""
     if group_id:
         settings = get_group_setting(group_id)
-        status_lines = ["Current Group Translation Settings:"]
     else:
         settings = get_user_setting(user_id)
-        status_lines = ["Current Translation Settings:"]
-    
-    status_lines.append(f"Enabled: {'Yes' if settings['enabled'] else 'No'}")
-    status_lines.append(f"Mode: {settings['mode']}")
-    
-    if settings['mode'] == 'pair':
-        source = settings.get('source_lang', 'Not set')
-        target = settings.get('target_lang', 'Not set')
-        status_lines.append(f"Languages: {source} <--> {target}")
-    elif settings['mode'] == 'american':
-        status_lines.append("Target: American English (en-US)")
-    elif settings['mode'] == 'mandarin':
-        status_lines.append("Target: Traditional Chinese (zh-TW)")
-    elif settings['mode'] == 'japanese':
-        status_lines.append("Target: Japanese (ja)")
-    
+
+    ui_lang = detect_ui_language(
+        user_id=user_id,
+        group_id=group_id,
+        ui_lang=settings.get("ui_lang"),
+        target_lang=settings.get("target_lang"),
+    )
+
+    if status_type == "help":
+        help_lines = get_localized_help_lines(lang=ui_lang, version=APP_VERSION, platform="LINE")
+        send_reply(reply_token, "\n".join(help_lines))
+        return
+
+    status_lines = get_localized_status_lines(
+        enabled=bool(settings.get("enabled")),
+        mode=settings.get("mode", "pair"),
+        source=settings.get("source_lang"),
+        target=settings.get("target_lang"),
+        lang=ui_lang,
+        is_group=bool(group_id),
+        ui_lang=settings.get("ui_lang"),
+    )
     send_reply(reply_token, "\n".join(status_lines))
 
 
@@ -767,7 +998,11 @@ def handle_message(event):
         # Check rate limit for text messages
         if not text_rate_limiter.is_allowed(user_id):
             print(f"Rate limit exceeded for user {user_id}")
-            send_reply(event.reply_token, "Rate limit exceeded. Please slow down (max 60 messages per minute).")
+            ui_lang = _resolve_ui_lang(
+                user_id,
+                event.source.group_id if isinstance(event.source, GroupSource) else None,
+            )
+            send_reply(event.reply_token, get_text("err_rate_limit_text", ui_lang))
             return
         
         # Check if this is a group chat
@@ -779,10 +1014,16 @@ def handle_message(event):
         # Check if message is a switch command
         cmd_info = parse_switch_command(user_message)
         if cmd_info:
-            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese"]:
+            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese", "set_lang"]:
                 handle_set_command(cmd_info, user_id, event.reply_token, group_id)
             elif cmd_info["type"] in ["status", "help"]:
                 handle_status_command(user_id, event.reply_token, group_id, cmd_info["type"])
+            elif cmd_info["type"] == "subscribe":
+                handle_subscribe_command(user_id, event.reply_token, group_id)
+            elif cmd_info["type"] == "activate_group":
+                handle_activate_group_command(user_id, event.reply_token, group_id)
+            elif cmd_info["type"] == "status_subscription":
+                handle_status_subscription_command(user_id, event.reply_token, group_id)
             return
         
         # Skip translation if message contains only emojis/LINE icons
@@ -801,14 +1042,27 @@ def handle_message(event):
             settings = get_group_setting(group_id)
         else:
             settings = get_user_setting(user_id)
+
+        premium_access = has_premium_access(user_id, group_id)
+        if requires_premium_for_translation(settings.get("mode", "pair"), settings["enabled"]):
+            if not premium_access:
+                ui_lang = _resolve_ui_lang(user_id, group_id)
+                send_reply(event.reply_token, get_text("err_premium_required", ui_lang))
+                return
         
-        translated = detect_and_translate(
-            user_message,
-            enabled=settings["enabled"],
-            source_lang=settings.get("source_lang"),
-            target_lang=settings.get("target_lang"),
-            mode=settings.get("mode", "pair")
-        )
+        try:
+            translated = detect_and_translate(
+                user_message,
+                enabled=settings["enabled"],
+                source_lang=settings.get("source_lang"),
+                target_lang=settings.get("target_lang"),
+                mode=settings.get("mode", "pair"),
+                premium_access=premium_access,
+            )
+        except TranslatePremiumRequiredError:
+            ui_lang = _resolve_ui_lang(user_id, group_id)
+            send_reply(event.reply_token, get_text("err_premium_required", ui_lang))
+            return
         
         # Only send reply if translation occurred and is different from original
         if translated != user_message and settings["enabled"]:
@@ -858,7 +1112,11 @@ def handle_audio_message(event):
         # Check rate limit for voice messages (more expensive, lower limit)
         if not voice_rate_limiter.is_allowed(user_id):
             print(f"Voice rate limit exceeded for user {user_id}")
-            send_reply(event.reply_token, "Voice message rate limit exceeded. Please slow down (max 10 voice messages per minute).")
+            ui_lang = _resolve_ui_lang(
+                user_id,
+                event.source.group_id if isinstance(event.source, GroupSource) else None,
+            )
+            send_reply(event.reply_token, get_text("err_rate_limit_voice", ui_lang))
             return
         
         # Check if this is a group chat
@@ -876,6 +1134,12 @@ def handle_audio_message(event):
             settings = get_group_setting(group_id)
         else:
             settings = get_user_setting(user_id)
+
+        premium_access = has_premium_access(user_id, group_id)
+        if requires_premium_for_voice() and not premium_access:
+            ui_lang = _resolve_ui_lang(user_id, group_id)
+            send_reply(event.reply_token, get_text("err_premium_required", ui_lang))
+            return
         
         # Check if voice translation is enabled
         if not is_voice_translation_enabled(settings):
@@ -910,7 +1174,7 @@ def handle_audio_message(event):
                     event.reply_token,
                     "Voice translation requires a language pair to be set.\n"
                     "Please set a language pair using:\n"
-                    "/set language pair <source> <target>\n\n"
+                    "/set pair <source> <target>\n\n"
                     "Or use American mode:\n"
                     "/set american\n\n"
                     "Or use Mandarin mode:\n"
@@ -963,7 +1227,7 @@ def handle_audio_message(event):
             
             print(f"Attempting speech recognition (American mode) with {primary_lang} and alternatives: {alternative_langs}")
             try:
-                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
+                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs, premium_access=True)
                 if transcribed_text and transcribed_text.strip():
                     print(f"✓ Speech recognized (American mode): {transcribed_text}")
                 else:
@@ -986,7 +1250,7 @@ def handle_audio_message(event):
                     
                     print(f"Attempting speech recognition (American mode) with {primary} and alternatives: {alternatives}")
                     try:
-                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
+                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives, premium_access=True)
                         if transcribed_text and transcribed_text.strip():
                             print(f"✓ Speech recognized (American mode): {transcribed_text}")
                             break
@@ -1019,7 +1283,8 @@ def handle_audio_message(event):
                     enabled=True,
                     source_lang=None,  # Let it auto-detect
                     target_lang="en-US",
-                    mode="american"
+                    mode="american",
+                    premium_access=True,
                 )
                 
                 print(f"Translated (American mode): {transcribed_text} -> {translated_text}")
@@ -1070,7 +1335,7 @@ def handle_audio_message(event):
             
             print(f"Attempting speech recognition (Mandarin mode) with {primary_lang} and alternatives: {alternative_langs}")
             try:
-                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
+                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs, premium_access=True)
                 if transcribed_text and transcribed_text.strip():
                     print(f"✓ Speech recognized (Mandarin mode): {transcribed_text}")
                 else:
@@ -1101,7 +1366,7 @@ def handle_audio_message(event):
                     
                     print(f"Attempting speech recognition (Mandarin mode) with {primary} and alternatives: {alternatives}")
                     try:
-                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
+                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives, premium_access=True)
                         if transcribed_text and transcribed_text.strip():
                             print(f"✓ Speech recognized (Mandarin mode): {transcribed_text}")
                             break
@@ -1134,7 +1399,8 @@ def handle_audio_message(event):
                     enabled=True,
                     source_lang=None,  # Let it auto-detect
                     target_lang="zh-TW",
-                    mode="mandarin"
+                    mode="mandarin",
+                    premium_access=True,
                 )
                 
                 print(f"Translated (Mandarin mode): {transcribed_text} -> {translated_text}")
@@ -1185,7 +1451,7 @@ def handle_audio_message(event):
             
             print(f"Attempting speech recognition (Japanese mode) with {primary_lang} and alternatives: {alternative_langs}")
             try:
-                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
+                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs, premium_access=True)
                 if transcribed_text and transcribed_text.strip():
                     print(f"✓ Speech recognized (Japanese mode): {transcribed_text}")
                 else:
@@ -1216,7 +1482,7 @@ def handle_audio_message(event):
                     
                     print(f"Attempting speech recognition (Japanese mode) with {primary} and alternatives: {alternatives}")
                     try:
-                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
+                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives, premium_access=True)
                         if transcribed_text and transcribed_text.strip():
                             print(f"✓ Speech recognized (Japanese mode): {transcribed_text}")
                             break
@@ -1249,7 +1515,8 @@ def handle_audio_message(event):
                     enabled=True,
                     source_lang=None,  # Let it auto-detect
                     target_lang="ja",
-                    mode="japanese"
+                    mode="japanese",
+                    premium_access=True,
                 )
                 
                 print(f"Translated (Japanese mode): {transcribed_text} -> {translated_text}")
@@ -1333,7 +1600,7 @@ def handle_audio_message(event):
         # Try source language first, with target language as alternative
         try:
             print(f"Attempting speech recognition with {source_lang} ({source_stt_code})...")
-            transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code])
+            transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code], premium_access=True)
             if transcribed_text and transcribed_text.strip():
                 detected_language = source_lang
                 print(f"✓ Speech recognized in {source_lang}: {transcribed_text}")
@@ -1349,7 +1616,7 @@ def handle_audio_message(event):
         if not transcribed_text:
             try:
                 print(f"Attempting speech recognition with {target_lang} ({target_stt_code})...")
-                transcribed_text = speech_to_text(audio_content, target_stt_code, alternative_language_codes=[source_stt_code])
+                transcribed_text = speech_to_text(audio_content, target_stt_code, alternative_language_codes=[source_stt_code], premium_access=True)
                 if transcribed_text and transcribed_text.strip():
                     detected_language = target_lang
                     print(f"✓ Speech recognized in {target_lang}: {transcribed_text}")
@@ -1408,7 +1675,8 @@ def handle_audio_message(event):
                 enabled=True,
                 source_lang=detected_language,
                 target_lang=translation_target,
-                mode="pair"
+                mode="pair",
+                premium_access=True,
             )
             
             print(f"Translated: {transcribed_text} -> {translated_text}")

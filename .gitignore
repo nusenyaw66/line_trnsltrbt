@@ -4,4 +4,8 @@
 .md
 !README.md
 __pycache__
+.venv/
+.pytest_cache/
+subscriptions.json
+user_settings.json
 

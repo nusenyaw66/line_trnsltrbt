@@ -16,6 +16,14 @@ from gcs_audio import download_telegram_audio, speech_to_text
 from gcs_translate import detect_and_translate
 from rate_limiter import text_rate_limiter, voice_rate_limiter
 from async_processor import async_processor
+from i18n import (
+    detect_ui_language,
+    get_lang_display_name,
+    get_localized_help_lines,
+    get_localized_status_lines,
+    get_text,
+    normalize_lang,
+)
 
 load_dotenv()
 BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -43,7 +51,7 @@ _COLLECTION_NAME = "user_settings"
 
 AMERICAN_MODE_LANGUAGES = [
     "en-US", "zh-TW", "es-ES", "ja-JP", "ko-KR", "fr-FR", "de-DE", "it-IT",
-    "pt-BR", "es-MX", "pt-PT", "zh-CN", "ru-RU", "ar-XA", "hi-IN", "th-TH",
+    "pt-BR", "es-MX", "pt-PT", "ru-RU", "ar-XA", "hi-IN", "th-TH",
     "id-ID", "vi-VN", "nl-NL", "pl-PL", "tr-TR", "fil-PH",
 ]
 
@@ -67,13 +75,13 @@ def get_user_setting(user_id: str) -> Dict[str, Any]:
         doc = cast(DocumentSnapshot, doc_ref.get())
         if doc.exists:
             data = doc.to_dict()
-            default_settings = {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None}
+            default_settings = {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
             default_settings.update(data or {})
             return default_settings
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None}
+        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
     except Exception as e:
         print(f"ERROR loading user settings from Firestore: {e}")
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None}
+        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
 
 
 def update_user_setting(user_id: str, updates: Dict[str, Any]) -> None:
@@ -96,13 +104,13 @@ def get_thread_setting(thread_id: str) -> Dict[str, Any]:
         doc = cast(DocumentSnapshot, doc_ref.get())
         if doc.exists:
             data = doc.to_dict()
-            default_settings = {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None}
+            default_settings = {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
             default_settings.update(data or {})
             return default_settings
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None}
+        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
     except Exception as e:
         print(f"ERROR loading thread settings from Firestore: {e}")
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None}
+        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
 
 
 def update_thread_setting(thread_id: str, updates: Dict[str, Any]) -> None:
@@ -131,14 +139,18 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
             return {"type": "set_on"}
         elif parts[1] == 'off':
             return {"type": "set_off"}
-        elif len(parts) >= 5 and parts[1] == 'language' and parts[2] == 'pair':
-            return {"type": "set_pair", "source": parts[3], "target": parts[4]}
+        elif len(parts) >= 4 and parts[1] == 'pair':
+            return {"type": "set_pair", "source": parts[2], "target": parts[3]}
         elif parts[1] == 'american':
             return {"type": "set_american"}
         elif parts[1] == 'mandarin':
             return {"type": "set_mandarin"}
         elif parts[1] == 'japanese':
             return {"type": "set_japanese"}
+        elif parts[1] == 'lang' and len(parts) >= 3:
+            return {"type": "set_lang", "code": parts[2]}
+    if command == '/lang' and len(parts) >= 2:
+        return {"type": "set_lang", "code": parts[1]}
     if command == '/help':
         return {"type": "help"}
     if command == '/status':
@@ -219,7 +231,8 @@ def is_emoji_only(message: str) -> bool:
 def normalize_language_code(code: str) -> str:
     code_lower = code.lower()
     code_map = {
-        "en": "en", "zh-tw": "zh-TW", "zh-cn": "zh-TW", "es": "es", "ja": "ja",
+        "en": "en", "zh-tw": "zh-TW", "zh-cn": "zh-TW", "zh-hans": "zh-TW", "zh-hant": "zh-TW",
+        "tw": "zh-TW", "es": "es", "ja": "ja",
         "jpn": "ja", "th": "th", "id": "id", "ind": "id", "fil": "fil",
         "tl": "fil", "tagalog": "fil", "filipino": "fil",
         "fr": "fr", "french": "fr", "it": "it", "italian": "it", "ita": "it",
@@ -230,109 +243,197 @@ def normalize_language_code(code: str) -> str:
     return code_map.get(code_lower, code)
 
 
-def handle_set_command(cmd_info: Dict[str, Any], chat_id: Union[int, str], user_id: str, thread_id: Optional[str] = None) -> None:
+def _telegram_platform_language(from_obj: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Return Telegram ``from.language_code`` when present (e.g. ``ja``, ``zh-hant``)."""
+    if not from_obj:
+        return None
+    code = from_obj.get("language_code")
+    if not code or not isinstance(code, str):
+        return None
+    stripped = code.strip()
+    return stripped or None
+
+
+def _resolve_ui_lang(
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Resolve the effective UI language from stored settings and Telegram profile.
+
+    Thread settings take precedence when present (a forum thread is the
+    conversation-scoped unit on Telegram). When no explicit ``ui_lang`` is stored,
+    falls back to translation ``target_lang``, then the user's Telegram client
+    ``language_code`` (Phase 2.5), then English.
+    """
+    settings = get_thread_setting(thread_id) if thread_id else get_user_setting(user_id)
+    return detect_ui_language(
+        user_id=user_id,
+        ui_lang=settings.get("ui_lang"),
+        target_lang=settings.get("target_lang"),
+        platform_language_code=_telegram_platform_language(from_obj),
+    )
+
+
+def handle_set_command(
+    cmd_info: Dict[str, Any],
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+
     if cmd_info["type"] == "set_on":
         if thread_id:
             update_thread_setting(thread_id, {"enabled": True})
-            send_message(chat_id, "Translation enabled for this conversation ✓")
+            send_message(chat_id, get_text("translation_enabled_thread", ui_lang))
         else:
             update_user_setting(user_id, {"enabled": True})
-            send_message(chat_id, "Translation enabled ✓")
+            send_message(chat_id, get_text("translation_enabled", ui_lang))
+
     elif cmd_info["type"] == "set_off":
         if thread_id:
             update_thread_setting(thread_id, {"enabled": False})
-            send_message(chat_id, "Translation disabled for this conversation ✓")
+            send_message(chat_id, get_text("translation_disabled_thread", ui_lang))
         else:
             update_user_setting(user_id, {"enabled": False})
-            send_message(chat_id, "Translation disabled ✓")
+            send_message(chat_id, get_text("translation_disabled", ui_lang))
+
     elif cmd_info["type"] == "set_pair":
         source = normalize_language_code(cmd_info["source"])
         target = normalize_language_code(cmd_info["target"])
         supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
+        supported = ", ".join(supported_codes)
         if source not in supported_codes:
-            send_message(chat_id, f"Invalid source language code: {cmd_info['source']}\nSupported: {', '.join(supported_codes)}")
+            send_message(
+                chat_id,
+                get_text("err_invalid_source", ui_lang, code=cmd_info["source"], supported=supported),
+            )
             return
         if target not in supported_codes:
-            send_message(chat_id, f"Invalid target language code: {cmd_info['target']}\nSupported: {', '.join(supported_codes)}")
+            send_message(
+                chat_id,
+                get_text("err_invalid_target", ui_lang, code=cmd_info["target"], supported=supported),
+            )
             return
         settings_update = {"enabled": True, "mode": "pair", "source_lang": source, "target_lang": target}
         if thread_id:
             update_thread_setting(thread_id, settings_update)
-            send_message(chat_id, f"Language pair set for this conversation: {source} → {target} ✓")
+            send_message(
+                chat_id,
+                get_text("pair_set_thread", ui_lang, source=source, target=target),
+            )
         else:
             update_user_setting(user_id, settings_update)
-            send_message(chat_id, f"Language pair set: {source} → {target} ✓")
+            send_message(
+                chat_id,
+                get_text("pair_set", ui_lang, source=source, target=target),
+            )
+
     elif cmd_info["type"] == "set_american":
         settings_update = {"enabled": True, "mode": "american", "source_lang": None, "target_lang": "en-US"}
         if thread_id:
             update_thread_setting(thread_id, settings_update)
-            send_message(chat_id, "American mode enabled for this conversation ✓\nAll detected languages will be translated to American English.")
+            send_message(chat_id, get_text("american_enabled_thread", ui_lang))
         else:
             update_user_setting(user_id, settings_update)
-            send_message(chat_id, "American mode enabled ✓\nAll detected languages will be translated to American English.")
+            send_message(chat_id, get_text("american_enabled", ui_lang))
+
     elif cmd_info["type"] == "set_mandarin":
         settings_update = {"enabled": True, "mode": "mandarin", "source_lang": None, "target_lang": "zh-TW"}
         if thread_id:
             update_thread_setting(thread_id, settings_update)
-            send_message(chat_id, "Mandarin mode enabled for this conversation ✓\nAll detected languages will be translated to Traditional Chinese (Taiwan).")
+            send_message(chat_id, get_text("mandarin_enabled_thread", ui_lang))
         else:
             update_user_setting(user_id, settings_update)
-            send_message(chat_id, "Mandarin mode enabled ✓\nAll detected languages will be translated to Traditional Chinese (Taiwan).")
+            send_message(chat_id, get_text("mandarin_enabled", ui_lang))
+
     elif cmd_info["type"] == "set_japanese":
         settings_update = {"enabled": True, "mode": "japanese", "source_lang": None, "target_lang": "ja"}
         if thread_id:
             update_thread_setting(thread_id, settings_update)
-            send_message(chat_id, "Japanese mode enabled for this conversation ✓\nAll detected languages will be translated to Japanese.")
+            send_message(chat_id, get_text("japanese_enabled_thread", ui_lang))
         else:
             update_user_setting(user_id, settings_update)
-            send_message(chat_id, "Japanese mode enabled ✓\nAll detected languages will be translated to Japanese.")
+            send_message(chat_id, get_text("japanese_enabled", ui_lang))
+
+    elif cmd_info["type"] == "set_lang":
+        handle_set_lang_command(cmd_info["code"], chat_id, user_id, thread_id, from_obj)
 
 
-def handle_status_command(chat_id: Union[int, str], thread_id: Optional[str] = None, status_type: str = "status") -> None:
-    if status_type == "help":
-        help_text = [
-            "Add Translator Bot to a Group and enable translation with following commands:",
-            "",
-            "Commands start with /",
-            "/set american - Translate All languages to American English",
-            "/set mandarin - Translate All languages to Traditional Chinese (Taiwan)",
-            "/set japanese - Translate All languages to Japanese",
-            "/set language pair <lang1> <lang2> - sets specific language pair (e.g., /set language pair zh-tw en)",
-            "Language options for /set language pair:",
-            '   "zh-TW"  # Mandarin (we only support Traditional Chinese),',
-            '   "ja"  # Japanese, also accepts "jpn",',
-            '   "th"  # Thai,',
-            '   "id"  # Indonesian, also accepts "ind",',
-            '   "fil"  # Filipino, also accepts "filipino", "tagalog", "tl",',
-            '   "vi"  # Vietnamese, also accepts "vie", "vietnamese",',
-            '   "en", "fr", "de", "it", "es", "ko"  # English, French, German, Italian, Spanish, Korean',
-            "/set off - disables translation",
-            "/status - returns current user settings",
-            "/help - returns this help message",
-            "", "Voice-to-text is only available to paid customers!",
-            "", f"Translator Bot for Telegram App. Version: {APP_VERSION}",
-            "", "Copyright 2026 Tesseract Tech. LLC, Meridian  ID, USA",
-            "Website: www.tssrct.us",
-            "", "For Translate All modes, see: https://docs.cloud.google.com/text-to-speech/docs/list-voices-and-types for supported languages."        
-        ]
-        send_message(chat_id, "\n".join(help_text))
+def handle_set_lang_command(
+    code: str,
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Handle /lang <code> and /set lang <code>.
+
+    Validates the requested UI language, persists ``ui_lang`` on the
+    appropriate scope (thread or user), and replies in the **new** language
+    so the user immediately sees that it took effect.
+    """
+    canonical = normalize_lang(code)
+    if not canonical:
+        current_ui = _resolve_ui_lang(user_id, thread_id, from_obj)
+        send_message(chat_id, get_text("err_unknown_ui_lang", current_ui, code=code))
         return
+
+    if thread_id:
+        update_thread_setting(thread_id, {"ui_lang": canonical})
+        msg_key = "lang_set_thread"
+    else:
+        update_user_setting(user_id, {"ui_lang": canonical})
+        msg_key = "lang_set"
+
+    send_message(
+        chat_id,
+        get_text(msg_key, canonical, lang_name=get_lang_display_name(canonical, canonical)),
+    )
+
+
+def handle_status_command(
+    chat_id: Union[int, str],
+    thread_id: Optional[str] = None,
+    status_type: str = "status",
+    user_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Handle /status and /help (localized).
+
+    ``user_id`` is used to read user-scoped settings when there is no thread
+    context. For backward compatibility (older callers that didn't pass it),
+    we fall back to ``chat_id`` as the user key, matching the prior behaviour.
+    """
     if thread_id:
         settings = get_thread_setting(thread_id)
-        status_lines = ["Current Conversation Translation Settings:"]
     else:
-        settings = get_user_setting(str(chat_id) if isinstance(chat_id, int) else chat_id)
-        status_lines = ["Current Translation Settings:"]
-    status_lines.append(f"Enabled: {'Yes' if settings['enabled'] else 'No'}")
-    status_lines.append(f"Mode: {settings['mode']}")
-    if settings['mode'] == 'pair':
-        status_lines.append(f"Languages: {settings.get('source_lang', 'Not set')} <--> {settings.get('target_lang', 'Not set')}")
-    elif settings['mode'] == 'american':
-        status_lines.append("Target: American English (en-US)")
-    elif settings['mode'] == 'mandarin':
-        status_lines.append("Target: Traditional Chinese (zh-TW)")
-    elif settings['mode'] == 'japanese':
-        status_lines.append("Target: Japanese (ja)")
+        key = user_id if user_id is not None else (str(chat_id) if isinstance(chat_id, int) else chat_id)
+        settings = get_user_setting(key)
+
+    ui_lang = detect_ui_language(
+        user_id=user_id,
+        ui_lang=settings.get("ui_lang"),
+        target_lang=settings.get("target_lang"),
+        platform_language_code=_telegram_platform_language(from_obj),
+    )
+
+    if status_type == "help":
+        help_lines = get_localized_help_lines(lang=ui_lang, version=APP_VERSION, platform="Telegram")
+        send_message(chat_id, "\n".join(help_lines))
+        return
+
+    status_lines = get_localized_status_lines(
+        enabled=bool(settings.get("enabled")),
+        mode=settings.get("mode", "pair"),
+        source=settings.get("source_lang"),
+        target=settings.get("target_lang"),
+        lang=ui_lang,
+        is_thread=bool(thread_id),
+        ui_lang=settings.get("ui_lang"),
+    )
     send_message(chat_id, "\n".join(status_lines))
 
 
@@ -418,15 +519,16 @@ def handle_text_message(
         # Check rate limit for text messages
         if not text_rate_limiter.is_allowed(user_id):
             print(f"Rate limit exceeded for user {user_id}")
-            send_message(chat_id, "Rate limit exceeded. Please slow down (max 60 messages per minute).")
+            ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+            send_message(chat_id, get_text("err_rate_limit_text", ui_lang))
             return
-        
+
         cmd_info = parse_switch_command(message_text)
         if cmd_info:
-            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese"]:
-                handle_set_command(cmd_info, chat_id, user_id, thread_id)
+            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese", "set_lang"]:
+                handle_set_command(cmd_info, chat_id, user_id, thread_id, from_obj)
             elif cmd_info["type"] in ["status", "help"]:
-                handle_status_command(chat_id, thread_id, cmd_info["type"])
+                handle_status_command(chat_id, thread_id, cmd_info["type"], user_id=user_id, from_obj=from_obj)
             return
         if is_emoji_only(message_text):
             return
@@ -458,12 +560,14 @@ def handle_voice_message(
     thread_id: Optional[str] = None,
 ) -> None:
     try:
+        ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+
         # Check rate limit for voice messages (more expensive, lower limit)
         if not voice_rate_limiter.is_allowed(user_id):
             print(f"Voice rate limit exceeded for user {user_id}")
-            send_message(chat_id, "Voice message rate limit exceeded. Please slow down (max 10 voice messages per minute).")
+            send_message(chat_id, get_text("err_rate_limit_voice", ui_lang))
             return
-        
+
         if thread_id:
             settings = get_thread_setting(thread_id)
         else:
@@ -475,19 +579,22 @@ def handle_voice_message(
             source_lang = settings.get("source_lang")
             target_lang = settings.get("target_lang")
             if mode == "american":
-                send_message(chat_id, "Voice translation is not enabled.\nPlease enable translation using:\n/set american")
+                send_message(chat_id, get_text("voice_translation_not_enabled_american", ui_lang))
             elif mode == "mandarin":
-                send_message(chat_id, "Voice translation is not enabled.\nPlease enable translation using:\n/set mandarin")
+                send_message(chat_id, get_text("voice_translation_not_enabled_mandarin", ui_lang))
             elif mode == "japanese":
-                send_message(chat_id, "Voice translation is not enabled.\nPlease enable translation using:\n/set japanese")
+                send_message(chat_id, get_text("voice_translation_not_enabled_japanese", ui_lang))
             elif not source_lang or not target_lang:
-                send_message(chat_id, "Voice translation requires a language pair.\n/set language pair <source> <target>\nOr /set american, /set mandarin, /set japanese")
+                send_message(chat_id, get_text("voice_translation_requires_pair", ui_lang))
             else:
-                send_message(chat_id, f"Voice translation not enabled or pair ({source_lang} → {target_lang}) not supported.")
+                send_message(
+                    chat_id,
+                    get_text("voice_pair_unsupported", ui_lang, source=source_lang, target=target_lang),
+                )
             return
 
         if not file_id:
-            send_message(chat_id, "Could not get voice file. Please try again.")
+            send_message(chat_id, get_text("voice_could_not_get_file", ui_lang))
             return
         try:
             if BOT_TOKEN is None:
@@ -495,7 +602,7 @@ def handle_voice_message(
             audio_content = download_telegram_audio(file_id, BOT_TOKEN)
         except Exception as e:
             print(f"ERROR downloading Telegram voice: {e}")
-            send_message(chat_id, "Could not download audio. Please try again.")
+            send_message(chat_id, get_text("voice_could_not_download", ui_lang))
             return
 
         mode = settings.get("mode")
@@ -523,12 +630,15 @@ def handle_voice_message(
                     except Exception as e:
                         recognition_errors.append(str(e))
             if not transcribed_text or not transcribed_text.strip():
-                send_message(chat_id, "Could not recognize speech. Please ensure audio is clear and try again.")
+                send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
                 return
             try:
                 translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=None, target_lang="en-US", mode="american")
             except Exception as e:
-                send_message(chat_id, f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation failed)")
+                send_message(
+                    chat_id,
+                    get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+                )
                 return
             send_message(chat_id, f"{user_identifier}:\n{translated_text}")
             return
@@ -554,12 +664,15 @@ def handle_voice_message(
                     except Exception as e:
                         recognition_errors.append(str(e))
             if not transcribed_text or not transcribed_text.strip():
-                send_message(chat_id, "Could not recognize speech. Please ensure audio is clear and try again.")
+                send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
                 return
             try:
                 translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=None, target_lang="zh-TW", mode="mandarin")
             except Exception as e:
-                send_message(chat_id, f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation failed)")
+                send_message(
+                    chat_id,
+                    get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+                )
                 return
             send_message(chat_id, f"{user_identifier}:\n{translated_text}")
             return
@@ -585,12 +698,15 @@ def handle_voice_message(
                     except Exception as e:
                         recognition_errors.append(str(e))
             if not transcribed_text or not transcribed_text.strip():
-                send_message(chat_id, "Could not recognize speech. Please ensure audio is clear and try again.")
+                send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
                 return
             try:
                 translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=None, target_lang="ja", mode="japanese")
             except Exception as e:
-                send_message(chat_id, f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation failed)")
+                send_message(
+                    chat_id,
+                    get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+                )
                 return
             send_message(chat_id, f"{user_identifier}:\n{translated_text}")
             return
@@ -598,7 +714,7 @@ def handle_voice_message(
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         if not source_lang or not target_lang:
-            send_message(chat_id, "Error: Language pair not properly configured.")
+            send_message(chat_id, get_text("voice_pair_misconfigured", ui_lang))
             return
         stt_language_map = {
             "en": "en-US", "zh-TW": "zh-TW", "es": "es-ES", "ja": "ja-JP",
@@ -609,7 +725,14 @@ def handle_voice_message(
         source_stt_code = stt_language_map.get(source_lang)
         target_stt_code = stt_language_map.get(target_lang)
         if not source_stt_code or not target_stt_code:
-            send_message(chat_id, f"Unsupported language(s) for voice. Supported: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi")
+            send_message(
+                chat_id,
+                get_text(
+                    "voice_unsupported_languages",
+                    ui_lang,
+                    supported="en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi",
+                ),
+            )
             return
         try:
             transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code])
@@ -621,23 +744,30 @@ def handle_voice_message(
                 detected_language = target_lang
             except Exception as e2:
                 recognition_errors.append(str(e2))
-                send_message(chat_id, "Could not recognize speech. Please ensure you speak in the configured language pair.")
+                send_message(chat_id, get_text("voice_could_not_recognize_pair", ui_lang))
                 return
         if not transcribed_text or not transcribed_text.strip():
-            send_message(chat_id, "Could not transcribe audio. Please try again with clearer audio.")
+            send_message(chat_id, get_text("voice_could_not_transcribe", ui_lang))
             return
         translation_target = target_lang if detected_language == source_lang else source_lang
         try:
             translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=detected_language, target_lang=translation_target, mode="pair")
         except Exception as e:
-            send_message(chat_id, f"{user_identifier}:\nTranscribed: {transcribed_text}\n(Translation failed)")
+            send_message(
+                chat_id,
+                get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+            )
             return
         send_message(chat_id, f"{user_identifier}:\n{translated_text}")
     except Exception as e:
         print(f"ERROR in handle_voice_message: {e}")
         print(traceback.format_exc())
         try:
-            send_message(chat_id, "An error occurred processing the voice message. Please try again.")
+            # Best-effort: fall back to user-scoped ui_lang since the resolved
+            # ui_lang may have been set before this block. If anything in
+            # _resolve_ui_lang explodes here, we silently swallow below.
+            fallback_ui = _resolve_ui_lang(user_id, thread_id, from_obj)
+            send_message(chat_id, get_text("voice_processing_error", fallback_ui))
         except Exception as _:
             pass
 

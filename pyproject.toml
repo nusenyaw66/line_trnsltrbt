@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "line_trnsltrbt"
-version = "0.1"
+version = "0.45"
 description = ""
 authors = ["Wayne Sun <x@tssrct.us>"]
 readme = "README.md"

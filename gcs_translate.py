@@ -5,6 +5,12 @@ import hashlib
 from functools import lru_cache
 from datetime import datetime, timedelta
 
+from premium_gating import is_ai_translation_mode
+
+
+class PremiumRequiredError(Exception):
+    """Raised when a premium-only translation feature is used without access."""
+
 
 _client: Optional[translate.Client] = None
 # Translation cache: {cache_key: (translated_text, timestamp)}
@@ -82,7 +88,8 @@ def detect_and_translate(
     enabled: bool = True,
     source_lang: Optional[str] = None,
     target_lang: Optional[str] = None,
-    mode: str = "pair"
+    mode: str = "pair",
+    premium_access: bool = True,
 ) -> str:
     """
     Detect and translate message based on user settings.
@@ -103,6 +110,9 @@ def detect_and_translate(
     """
     if not enabled:
         return message
+
+    if is_ai_translation_mode(mode) and not premium_access:
+        raise PremiumRequiredError("Premium subscription required for AI translation modes")
     
     try:
         client = _get_client()
@@ -117,7 +127,7 @@ def detect_and_translate(
         
         # Mandarin mode: translate any detected language to zh-TW
         if mode == "mandarin":
-            if detected_lang in {"zh", "zh-CN", "zh-TW"}:
+            if detected_lang == "zh-TW":
                 return message  # Already Traditional Chinese
             return translate_text(message, "zh-TW")
         
