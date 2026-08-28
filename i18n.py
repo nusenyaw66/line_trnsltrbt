@@ -26,11 +26,12 @@ DEFAULT_LANG = "en"
 
 # Offline / test fallback when Google client is unavailable.
 _FALLBACK_UI_LANGS: frozenset[str] = frozenset({
-    "en", "zh-TW", "ja", "ko", "es", "th", "id", "fil", "vi", "fr", "de", "it",
+    "en", "zh-TW", "zh-CN", "ja", "ko", "es", "th", "id", "fil", "vi", "fr", "de", "it",
 })
 _FALLBACK_LANG_NAMES: dict[str, str] = {
     "en": "English",
     "zh-TW": "Chinese (Traditional)",
+    "zh-CN": "Chinese (Simplified)",
     "ja": "Japanese",
     "ko": "Korean",
     "es": "Spanish",
@@ -55,15 +56,27 @@ _ALIAS_MAP: dict[str, str] = {
     "zh_tw": "zh-TW",
     "zh-hant": "zh-TW",
     "zh_hant": "zh-TW",
-    "zh-hans": "zh-TW",
-    "zh_hans": "zh-TW",
-    "zh-cn": "zh-TW",
-    "zh_cn": "zh-TW",
+    "zh-hant-tw": "zh-TW",
     "zhtw": "zh-TW",
     "tw": "zh-TW",
     "traditional": "zh-TW",
     "繁中": "zh-TW",
     "繁體中文": "zh-TW",
+    "繁体中文": "zh-TW",
+
+    "zh": "zh-CN",
+    "zh-cn": "zh-CN",
+    "zh_cn": "zh-CN",
+    "zhcn": "zh-CN",
+    "zh-hans": "zh-CN",
+    "zh_hans": "zh-CN",
+    "zh-hans-cn": "zh-CN",
+    "cn": "zh-CN",
+    "simplified": "zh-CN",
+    "简体": "zh-CN",
+    "简体中文": "zh-CN",
+    "簡體": "zh-CN",
+    "簡體中文": "zh-CN",
 
     "ja": "ja",
     "jp": "ja",
@@ -116,9 +129,9 @@ def _canonical_from_google(code: str) -> Optional[str]:
 
 
 def _finalize_ui_lang_code(canonical: Optional[str]) -> Optional[str]:
-    """Map disallowed codes to supported equivalents (Simplified → Traditional)."""
-    if canonical == "zh-CN":
-        return "zh-TW"
+    """Treat generic ``zh`` as Simplified Chinese; keep Traditional distinct."""
+    if canonical == "zh":
+        return "zh-CN"
     return canonical
 
 
@@ -126,7 +139,8 @@ def normalize_lang(code: Optional[str]) -> Optional[str]:
     """Normalize a user-supplied language code to a canonical supported code.
 
     Returns ``None`` if the code is empty or unrecognized. Simplified Chinese
-    inputs (``zh-CN``, ``zh-hans``, etc.) normalize to ``zh-TW``.
+    inputs (``zh-CN``, ``zh-hans``, ``cn``, etc.) normalize to ``zh-CN``;
+    Traditional inputs (``zh-TW``, ``zh-hant``, ``tw``, etc.) stay ``zh-TW``.
     """
     if not code:
         return None
@@ -251,6 +265,9 @@ def get_localized_status_lines(
     is_group: bool = False,
     is_thread: bool = False,
     ui_lang: Optional[str] = None,
+    voice_enabled: Optional[bool] = None,
+    voice_gender: Optional[str] = None,
+    subscription_expires: Optional[str] = None,
 ) -> list[str]:
     """Render the ``/status`` body; dynamically translated when ``lang`` != ``en``."""
     en = DEFAULT_LANG
@@ -281,6 +298,15 @@ def get_localized_status_lines(
             f"{get_text('ui_language', en)}: "
             f"{get_lang_display_name(ui_lang, en)}"
         )
+
+    if voice_enabled is not None:
+        lines.append(f"{get_text('status_voice', en)}: {_yes_no(voice_enabled, en)}")
+        gender_label = (voice_gender or "female").strip().lower() or "female"
+        lines.append(f"{get_text('status_voice_gender', en)}: {gender_label}")
+        if subscription_expires:
+            lines.append(
+                f"{get_text('subscription_expires', en)}: {subscription_expires}"
+            )
 
     canonical = normalize_lang(lang) or DEFAULT_LANG
     if canonical != DEFAULT_LANG:
@@ -342,7 +368,7 @@ def get_localized_help_lines(
 ) -> list[str]:
     """Render the ``/help`` body; dynamically translated when ``lang`` != ``en``."""
     en = DEFAULT_LANG
-    lines = [
+    command_lines = [
         get_text("help_intro", en),
         "",
         get_text("help_commands_header", en),
@@ -356,11 +382,32 @@ def get_localized_help_lines(
         get_text("help_status", en),
         get_text("help_help", en),
         get_text("help_lang", en),
-        get_text("help_subscribe", en),
-        get_text("help_activate_group", en),
-        get_text("help_status_subscription", en),
-        "",
-        get_text("help_voice_paid_only", en),
+    ]
+    if platform == "Telegram":
+        command_lines.extend(
+            [
+                get_text("help_set_voice", en),
+                get_text("help_set_voice_gender", en),
+                get_text("help_subscribe_telegram", en),
+                get_text("help_activate_group", en),
+                get_text("help_status_subscription", en),
+                get_text("help_terms", en),
+                get_text("help_paysupport", en),
+                "",
+                get_text("help_voice_telegram", en),
+            ]
+        )
+    else:
+        command_lines.extend(
+            [
+                get_text("help_subscribe", en),
+                get_text("help_activate_group", en),
+                get_text("help_status_subscription", en),
+                "",
+                get_text("help_voice_paid_only", en),
+            ]
+        )
+    lines = command_lines + [
         "",
         get_text("help_version", en, version=version, platform=platform),
         "",

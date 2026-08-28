@@ -36,8 +36,11 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 # Copy application code
 COPY . /app
 
-# Create non-root user for security
-RUN groupadd -r appuser && useradd -r -g appuser appuser && \
+# ffmpeg + libopus for Live Translate PCM / Grok WAV → Telegram OGG Opus; then drop root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -r appuser && useradd -r -g appuser appuser && \
     chown -R appuser:appuser /app
 
 USER appuser

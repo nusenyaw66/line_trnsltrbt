@@ -150,6 +150,7 @@ def _save_settings_to_json(doc_id: str, settings: Dict[str, Any]) -> None:
 # These are used when mode is "american" to detect any language and translate to English
 AMERICAN_MODE_LANGUAGES = [
     "en-US",      # English (most common)
+    "zh-CN",      # Chinese (Simplified)
     "zh-TW",      # Chinese (Traditional)
     "es-ES",      # Spanish (Spain)
     "ja-JP",      # Japanese
@@ -586,7 +587,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         # Supported languages for voice translation
-        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
+        supported_languages = ["en", "zh-TW", "zh-CN", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         # Check if both languages are set and supported
         if source_lang and target_lang:
             if source_lang in supported_languages and target_lang in supported_languages:
@@ -650,10 +651,12 @@ def normalize_language_code(code: str) -> str:
     code_map = {
         "en": "en",
         "zh-tw": "zh-TW",
-        "zh-cn": "zh-TW",
-        "zh-hans": "zh-TW",
         "zh-hant": "zh-TW",
         "tw": "zh-TW",
+        "zh-cn": "zh-CN",
+        "zh-hans": "zh-CN",
+        "cn": "zh-CN",
+        "zh": "zh-CN",
         "es": "es",
         "ja": "ja",
         "jpn": "ja",  # Also accept jpn
@@ -710,7 +713,7 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, reply_token: str,
         source = normalize_language_code(source_input)
         target = normalize_language_code(target_input)
 
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
+        supported_codes = ["en", "zh-TW", "zh-CN", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
 
         if source not in supported_codes:
             supported = ", ".join(supported_codes)
@@ -1181,14 +1184,14 @@ def handle_audio_message(event):
                     "/set mandarin\n\n"
                     "Or use Japanese mode:\n"
                     "/set japanese\n\n"
-                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil, vi, fr, it, de, ko"
+                    "Supported languages for pair mode: en, zh-TW, zh-CN, es, ja, th, id, fil, vi, fr, it, de, ko"
                 )
             else:
                 send_reply(
                     event.reply_token,
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
-                    "Supported languages: en, zh-TW, es, ja, th, id, fil, vi, fr, it, de, ko\n"
+                    "Supported languages: en, zh-TW, zh-CN, es, ja, th, id, fil, vi, fr, it, de, ko\n"
                     "Or use American mode: /set american\n"
                     "Or use Mandarin mode: /set mandarin\n"
                     "Or use Japanese mode: /set japanese"
@@ -1564,6 +1567,7 @@ def handle_audio_message(event):
         stt_language_map = {
             "en": "en-US",
             "zh-TW": "zh-TW",
+            "zh-CN": "zh-CN",
             "es": "es-ES",  # Spanish (Spain), can also use es-MX for Mexico
             "ja": "ja-JP",
             "th": "th-TH",
@@ -1590,7 +1594,7 @@ def handle_audio_message(event):
             send_reply(
                 event.reply_token,
                 f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
-                "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi"
+                "Supported languages: en, zh-TW, zh-CN, es, ja, th, id, fil, fr, it, de, ko, vi"
             )
             return
         
@@ -1635,6 +1639,7 @@ def handle_audio_message(event):
             lang_names = {
                 "en": "English",
                 "zh-TW": "Traditional Chinese",
+                "zh-CN": "Simplified Chinese",
                 "es": "Spanish",
                 "ja": "Japanese",
                 "th": "Thai",

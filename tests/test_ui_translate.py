@@ -31,9 +31,10 @@ def test_mask_preserves_urls():
 
 
 def test_mask_preserves_quoted_language_codes():
-    text = '   "zh-TW"  # Mandarin, "ja"  # Japanese'
+    text = '   "zh-TW"  # Mandarin, "zh-CN"  # Simplified, "ja"  # Japanese'
     masked, placeholders = mask_non_translatable(text)
     assert '"zh-TW"' not in masked
+    assert '"zh-CN"' not in masked
     restored = unmask_translated(masked, placeholders)
     assert restored == text
 

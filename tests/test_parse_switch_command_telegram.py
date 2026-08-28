@@ -62,6 +62,30 @@ def test_existing_commands_still_parse():
     }
 
 
+@pytest.mark.parametrize(
+    "msg,expected",
+    [
+        ("/set voice on", {"type": "set_voice", "value": "on"}),
+        ("/set voice off", {"type": "set_voice", "value": "off"}),
+        ("/set voice male", {"type": "set_voice", "value": "male"}),
+        ("/set voice female", {"type": "set_voice", "value": "female"}),
+        ("/subscribe", {"type": "subscribe"}),
+        ("/subscribe@MyBot", {"type": "subscribe"}),
+        ("/terms", {"type": "terms"}),
+        ("/paysupport", {"type": "paysupport"}),
+        ("/activate group", {"type": "activate_group"}),
+        ("/status subscription", {"type": "status_subscription"}),
+    ],
+)
+def test_parses_voice_and_payment_commands(msg, expected):
+    assert _parse(msg) == expected
+
+
+def test_set_voice_without_value_is_not_a_command():
+    assert _parse("/set voice") is None
+    assert _parse("/set voice loud") is None
+
+
 def test_non_command_returns_none():
     assert _parse("hello there") is None
     assert _parse("") is None

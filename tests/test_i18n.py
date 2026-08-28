@@ -83,6 +83,13 @@ def test_get_text_format_with_bad_placeholder_does_not_crash():
         ("zh-Hant", "zh-TW"),
         ("tw", "zh-TW"),
         ("繁中", "zh-TW"),
+        ("zh-cn", "zh-CN"),
+        ("ZH-CN", "zh-CN"),
+        ("zh_cn", "zh-CN"),
+        ("zh-Hans", "zh-CN"),
+        ("cn", "zh-CN"),
+        ("simplified", "zh-CN"),
+        ("简体中文", "zh-CN"),
         ("ja", "ja"),
         ("JA", "ja"),
         ("jp", "ja"),
@@ -105,6 +112,8 @@ def test_supported_lang_codes_matches_fallback_set():
     assert set(supported_lang_codes()) == set(get_supported_ui_langs())
     assert "en" in supported_lang_codes()
     assert "ko" in supported_lang_codes()
+    assert "zh-CN" in supported_lang_codes()
+    assert "zh-TW" in supported_lang_codes()
 
 
 def test_load_locale_returns_english_dict():
@@ -123,6 +132,10 @@ def test_detect_ui_language_returns_zh_tw_when_set():
     assert detect_ui_language(user_id="test-user", ui_lang="zh-TW") == "zh-TW"
 
 
+def test_detect_ui_language_returns_zh_cn_when_set():
+    assert detect_ui_language(user_id="test-user", ui_lang="zh-CN") == "zh-CN"
+
+
 def test_detect_ui_language_returns_ja_when_set():
     assert detect_ui_language(user_id="test-user", ui_lang="ja") == "ja"
 
@@ -130,12 +143,14 @@ def test_detect_ui_language_returns_ja_when_set():
 def test_detect_ui_language_normalizes_input():
     assert detect_ui_language(ui_lang="JP") == "ja"
     assert detect_ui_language(ui_lang="zh_tw") == "zh-TW"
+    assert detect_ui_language(ui_lang="zh_cn") == "zh-CN"
 
 
 def test_detect_ui_language_infers_from_target_lang():
     assert detect_ui_language(target_lang="ja") == "ja"
     assert detect_ui_language(target_lang="ja-JP") == "ja"
     assert detect_ui_language(target_lang="zh-TW") == "zh-TW"
+    assert detect_ui_language(target_lang="zh-CN") == "zh-CN"
     assert detect_ui_language(target_lang="ko") == "ko"
 
 
@@ -151,6 +166,7 @@ def test_detect_ui_language_from_platform_language_code():
     assert detect_ui_language(platform_language_code="ja") == "ja"
     assert detect_ui_language(platform_language_code="ja-JP") == "ja"
     assert detect_ui_language(platform_language_code="zh-hant") == "zh-TW"
+    assert detect_ui_language(platform_language_code="zh-hans") == "zh-CN"
 
 
 def test_detect_ui_language_target_beats_platform():
@@ -171,21 +187,28 @@ def test_detect_ui_language_platform_beats_default():
     "raw",
     [
         "zh-hant",
+        "zh-TW",
+        "zh_tw",
+        "tw",
+    ],
+)
+def test_normalize_lang_maps_traditional_chinese_to_zh_tw(raw):
+    assert normalize_lang(raw) == "zh-TW"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
         "zh-hans",
         "zh-cn",
         "zh-CN",
         "zh_cn",
-        "tw",
+        "cn",
+        "zh",
     ],
 )
-def test_normalize_lang_maps_chinese_variants_to_zh_tw(raw):
-    assert normalize_lang(raw) == "zh-TW"
-
-
-def test_normalize_lang_never_returns_zh_cn():
-    for raw in ("zh-CN", "zh-hans", "zh-cn", "zh_cn"):
-        assert normalize_lang(raw) != "zh-CN"
-        assert normalize_lang(raw) == "zh-TW"
+def test_normalize_lang_maps_simplified_chinese_to_zh_cn(raw):
+    assert normalize_lang(raw) == "zh-CN"
 
 
 # ---------- display names ----------
@@ -193,6 +216,7 @@ def test_normalize_lang_never_returns_zh_cn():
 def test_get_lang_display_name_returns_google_names():
     assert get_lang_display_name("en") == "English"
     assert get_lang_display_name("zh-TW") == "Chinese (Traditional)"
+    assert get_lang_display_name("zh-CN") == "Chinese (Simplified)"
     assert get_lang_display_name("ja") == "Japanese"
     assert get_lang_display_name("ko") == "Korean"
 
@@ -260,6 +284,7 @@ def test_get_localized_help_lines_preserves_commands_in_english_source():
     assert any("/subscribe" in line for line in lines)
     assert any("/activate group" in line for line in lines)
     assert any("/status subscription" in line for line in lines)
+    assert any("zh-CN" in line for line in lines)
 
 
 def test_get_localized_help_lines_platform_is_threaded_through():
@@ -267,6 +292,31 @@ def test_get_localized_help_lines_platform_is_threaded_through():
     lines_tele = get_localized_help_lines(lang="en", version="1.0", platform="Telegram")
     assert any("LINE" in line for line in lines_line)
     assert any("Telegram" in line for line in lines_tele)
+
+
+def test_get_localized_help_lines_telegram_has_voice_and_stars_commands():
+    lines = get_localized_help_lines(lang="en", version="1.0", platform="Telegram")
+    joined = "\n".join(lines)
+    assert "/set voice" in joined
+    assert "/terms" in joined
+    assert "/paysupport" in joined
+    assert "Stars" in joined
+    assert "Voice-to-text is only available to paid customers!" not in joined
+
+
+def test_get_localized_status_lines_includes_voice_when_provided():
+    lines = get_localized_status_lines(
+        enabled=True,
+        mode="american",
+        lang="en",
+        voice_enabled=True,
+        voice_gender="male",
+        subscription_expires="2026-09-26 12:00 UTC",
+    )
+    joined = "\n".join(lines)
+    assert "Spoken replies" in joined
+    assert "male" in joined
+    assert "2026-09-26" in joined
 
 
 # ---------- error messages ----------

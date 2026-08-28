@@ -19,6 +19,7 @@ psutil = "^5.9.0"
 line-bot-sdk = "3.17.0"  # Only needed for LINE bot (line_translator_bot.py)
 flask = "^3.1.0"
 flask-cors = "^5.0.0"
+google-genai = "^2.8.0"
 # Note: Facebook Messenger bot (messenger_translator_bot.py) uses standard library only
 # (urllib, json, hmac, hashlib) - no additional dependencies needed
 

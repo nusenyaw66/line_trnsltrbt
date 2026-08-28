@@ -4,6 +4,7 @@ import re
 import traceback
 import urllib.error
 import urllib.request
+import uuid
 import hmac
 from typing import Any, Dict, Optional, Union, cast
 
@@ -14,15 +15,35 @@ from google.cloud.firestore_v1.base_document import DocumentSnapshot
 
 from gcs_audio import download_telegram_audio, speech_to_text
 from gcs_translate import detect_and_translate
-from rate_limiter import text_rate_limiter, voice_rate_limiter
+from gemini_live_translate import (
+    live_translate_enabled,
+    live_translate_supported_mode,
+    live_translate_voice_note,
+)
+from gemini_voice import GeminiVoiceError, speak_translation
+from rate_limiter import ai_voice_rate_limiter, text_rate_limiter, voice_rate_limiter
 from async_processor import async_processor
+from firestore_client import get_group_activation, get_user_subscription, save_group_activation
 from i18n import (
     detect_ui_language,
+    format_subscription_expiry,
     get_lang_display_name,
     get_localized_help_lines,
     get_localized_status_lines,
+    get_localized_subscription_status_lines,
     get_text,
     normalize_lang,
+)
+from subscription_access import has_premium_access
+from subscription_commands import build_activate_group_updates
+from subscription_models import personal_subscription_from_settings
+from telegram_payments import (
+    create_invoice_link,
+    grant_free_voice_subscription,
+    handle_pre_checkout_query,
+    handle_successful_payment,
+    is_free_beta,
+    stars_amount,
 )
 
 load_dotenv()
@@ -49,8 +70,18 @@ WEBHOOK_SECRET: str = WEBHOOK_SECRET_RAW
 _db_client: Optional[Client] = None
 _COLLECTION_NAME = "user_settings"
 
+_DEFAULT_SETTINGS = {
+    "enabled": False,
+    "mode": "pair",
+    "source_lang": None,
+    "target_lang": None,
+    "ui_lang": None,
+    "voice_enabled": False,
+    "voice_gender": "female",
+}
+
 AMERICAN_MODE_LANGUAGES = [
-    "en-US", "zh-TW", "es-ES", "ja-JP", "ko-KR", "fr-FR", "de-DE", "it-IT",
+    "en-US", "zh-CN", "zh-TW", "es-ES", "ja-JP", "ko-KR", "fr-FR", "de-DE", "it-IT",
     "pt-BR", "es-MX", "pt-PT", "ru-RU", "ar-XA", "hi-IN", "th-TH",
     "id-ID", "vi-VN", "nl-NL", "pl-PL", "tr-TR", "fil-PH",
 ]
@@ -68,20 +99,27 @@ def _get_db() -> Client:
     return _db_client
 
 
+def _default_settings() -> Dict[str, Any]:
+    return dict(_DEFAULT_SETTINGS)
+
+
+def _merge_settings(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    merged = _default_settings()
+    merged.update(data or {})
+    return merged
+
+
 def get_user_setting(user_id: str) -> Dict[str, Any]:
     try:
         db = _get_db()
         doc_ref = db.collection(_COLLECTION_NAME).document(user_id)
         doc = cast(DocumentSnapshot, doc_ref.get())
         if doc.exists:
-            data = doc.to_dict()
-            default_settings = {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
-            default_settings.update(data or {})
-            return default_settings
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
+            return _merge_settings(doc.to_dict())
+        return _default_settings()
     except Exception as e:
         print(f"ERROR loading user settings from Firestore: {e}")
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
+        return _default_settings()
 
 
 def update_user_setting(user_id: str, updates: Dict[str, Any]) -> None:
@@ -103,14 +141,11 @@ def get_thread_setting(thread_id: str) -> Dict[str, Any]:
         doc_ref = db.collection(_COLLECTION_NAME).document(doc_id)
         doc = cast(DocumentSnapshot, doc_ref.get())
         if doc.exists:
-            data = doc.to_dict()
-            default_settings = {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
-            default_settings.update(data or {})
-            return default_settings
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
+            return _merge_settings(doc.to_dict())
+        return _default_settings()
     except Exception as e:
         print(f"ERROR loading thread settings from Firestore: {e}")
-        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
+        return _default_settings()
 
 
 def update_thread_setting(thread_id: str, updates: Dict[str, Any]) -> None:
@@ -134,6 +169,8 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
     if len(parts) == 0:
         return None
     command = parts[0]
+    if "@" in command:
+        command = command.split("@", 1)[0]
     if command == '/set' and len(parts) >= 2:
         if parts[1] == 'on':
             return {"type": "set_on"}
@@ -149,11 +186,23 @@ def parse_switch_command(message: str) -> Optional[Dict[str, Any]]:
             return {"type": "set_japanese"}
         elif parts[1] == 'lang' and len(parts) >= 3:
             return {"type": "set_lang", "code": parts[2]}
+        elif parts[1] == 'voice' and len(parts) >= 3 and parts[2] in ("on", "off", "male", "female"):
+            return {"type": "set_voice", "value": parts[2]}
     if command == '/lang' and len(parts) >= 2:
         return {"type": "set_lang", "code": parts[1]}
+    if command == '/subscribe':
+        return {"type": "subscribe"}
+    if command == '/activate' and len(parts) >= 2 and parts[1] == 'group':
+        return {"type": "activate_group"}
+    if command == '/terms':
+        return {"type": "terms"}
+    if command == '/paysupport':
+        return {"type": "paysupport"}
     if command == '/help':
         return {"type": "help"}
     if command == '/status':
+        if len(parts) >= 2 and parts[1] == 'subscription':
+            return {"type": "status_subscription"}
         return {"type": "status"}
     return None
 
@@ -199,6 +248,125 @@ def send_message(chat_id: Union[int, str], text: str) -> None:
         print(traceback.format_exc())
 
 
+def _telegram_json(method: str, payload: Dict[str, Any], timeout: int = 10) -> None:
+    if BOT_TOKEN is None:
+        raise ValueError("BOT_TOKEN is not set.")
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        result = json.loads(response.read().decode())
+        if not result.get("ok"):
+            print(f"ERROR {method}: {result.get('description', 'unknown')}")
+
+
+def send_chat_action(chat_id: Union[int, str], action: str = "record_voice") -> None:
+    try:
+        _telegram_json("sendChatAction", {"chat_id": chat_id, "action": action})
+    except Exception as e:
+        print(f"ERROR sending chat action: {e}")
+
+
+def send_voice(
+    chat_id: Union[int, str],
+    ogg_bytes: bytes,
+    caption: Optional[str] = None,
+) -> None:
+    if BOT_TOKEN is None:
+        raise ValueError("BOT_TOKEN is not set.")
+    try:
+        boundary = uuid.uuid4().hex
+        body = bytearray()
+
+        def _add_field(name: str, value: str) -> None:
+            body.extend(f"--{boundary}\r\n".encode("utf-8"))
+            body.extend(
+                f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8")
+            )
+            body.extend(value.encode("utf-8"))
+            body.extend(b"\r\n")
+
+        _add_field("chat_id", str(chat_id))
+        if caption:
+            _add_field("caption", caption[:1024])
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            b'Content-Disposition: form-data; name="voice"; filename="translation.ogg"\r\n'
+        )
+        body.extend(b"Content-Type: audio/ogg\r\n\r\n")
+        body.extend(ogg_bytes)
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendVoice"
+        req = urllib.request.Request(
+            url,
+            data=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=60) as response:
+            result = json.loads(response.read().decode())
+            if not result.get("ok"):
+                print(f"ERROR sending voice: {result.get('description', 'unknown')}")
+            else:
+                print(f"Voice sent to chat_id={chat_id}")
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode() if hasattr(e, "read") else None
+        print(f"ERROR sending voice: HTTP {e.code} {e.reason}")
+        if detail:
+            print(f"  Error details: {detail}")
+        raise
+    except Exception as e:
+        print(f"ERROR sending voice: {e}")
+        print(traceback.format_exc())
+        raise
+
+
+def telegram_has_voice_access(user_id: str, thread_id: Optional[str] = None) -> bool:
+    user_subscription = get_user_subscription(user_id)
+    group_settings = get_group_activation(thread_id) if thread_id else None
+    return has_premium_access(
+        user_id,
+        user_subscription,
+        group_id=thread_id,
+        group_settings=group_settings,
+    )
+
+
+def _telegram_speech_to_text(
+    audio_content: bytes,
+    language_code: str,
+    alternative_language_codes: Optional[list[str]] = None,
+) -> str:
+    return speech_to_text(
+        audio_content,
+        language_code,
+        alternative_language_codes=alternative_language_codes,
+        premium_access=True,
+    )
+
+
+def _send_stars_invoice_link(
+    chat_id: Union[int, str],
+    user_id: str,
+    ui_lang: str,
+    message_key: str,
+    **format_kwargs: Any,
+) -> None:
+    try:
+        if BOT_TOKEN is None:
+            raise ValueError("BOT_TOKEN is not set.")
+        link = create_invoice_link(BOT_TOKEN, user_id)
+        send_message(chat_id, get_text(message_key, ui_lang, url=link, **format_kwargs))
+    except Exception as e:
+        print(f"ERROR creating Stars invoice link: {e}")
+        send_message(chat_id, get_text("telegram_invoice_failed", ui_lang))
+
+
 def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     if not settings.get("enabled", False):
         return False
@@ -206,7 +374,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
     if mode == "pair":
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
-        supported = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "vi"]
+        supported = ["en", "zh-TW", "zh-CN", "es", "ja", "th", "id", "fil", "vi"]
         if source_lang and target_lang and source_lang in supported and target_lang in supported:
             return True
     elif mode in ("american", "mandarin", "japanese"):
@@ -231,8 +399,9 @@ def is_emoji_only(message: str) -> bool:
 def normalize_language_code(code: str) -> str:
     code_lower = code.lower()
     code_map = {
-        "en": "en", "zh-tw": "zh-TW", "zh-cn": "zh-TW", "zh-hans": "zh-TW", "zh-hant": "zh-TW",
-        "tw": "zh-TW", "es": "es", "ja": "ja",
+        "en": "en", "zh-tw": "zh-TW", "zh-hant": "zh-TW", "tw": "zh-TW",
+        "zh-cn": "zh-CN", "zh-hans": "zh-CN", "cn": "zh-CN", "zh": "zh-CN",
+        "es": "es", "ja": "ja",
         "jpn": "ja", "th": "th", "id": "id", "ind": "id", "fil": "fil",
         "tl": "fil", "tagalog": "fil", "filipino": "fil",
         "fr": "fr", "french": "fr", "it": "it", "italian": "it", "ita": "it",
@@ -303,7 +472,7 @@ def handle_set_command(
     elif cmd_info["type"] == "set_pair":
         source = normalize_language_code(cmd_info["source"])
         target = normalize_language_code(cmd_info["target"])
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
+        supported_codes = ["en", "zh-TW", "zh-CN", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         supported = ", ".join(supported_codes)
         if source not in supported_codes:
             send_message(
@@ -361,6 +530,9 @@ def handle_set_command(
     elif cmd_info["type"] == "set_lang":
         handle_set_lang_command(cmd_info["code"], chat_id, user_id, thread_id, from_obj)
 
+    elif cmd_info["type"] == "set_voice":
+        handle_set_voice_command(cmd_info["value"], chat_id, user_id, thread_id, from_obj)
+
 
 def handle_set_lang_command(
     code: str,
@@ -394,6 +566,147 @@ def handle_set_lang_command(
     )
 
 
+def handle_set_voice_command(
+    value: str,
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+    if value in ("male", "female"):
+        updates = {"voice_gender": value}
+        if thread_id:
+            update_thread_setting(thread_id, updates)
+            send_message(chat_id, get_text("voice_gender_set_thread", ui_lang, gender=value))
+        else:
+            update_user_setting(user_id, updates)
+            send_message(chat_id, get_text("voice_gender_set", ui_lang, gender=value))
+        return
+
+    if value == "off":
+        if thread_id:
+            update_thread_setting(thread_id, {"voice_enabled": False})
+            send_message(chat_id, get_text("voice_off_disabled_thread", ui_lang))
+        else:
+            update_user_setting(user_id, {"voice_enabled": False})
+            send_message(chat_id, get_text("voice_off_disabled", ui_lang))
+        return
+
+    if not telegram_has_voice_access(user_id, thread_id):
+        if is_free_beta():
+            grant_free_voice_subscription(user_id)
+            if thread_id:
+                user_subscription = get_user_subscription(user_id)
+                result = build_activate_group_updates(user_id, user_subscription, thread_id)
+                if result.ok and result.group_updates is not None:
+                    save_group_activation(thread_id, result.group_updates)
+        elif thread_id:
+            send_message(chat_id, get_text("telegram_subscribe_open_private", ui_lang))
+            return
+        else:
+            _send_stars_invoice_link(chat_id, user_id, ui_lang, "voice_subscribe_required")
+            return
+
+    if thread_id:
+        update_thread_setting(thread_id, {"voice_enabled": True})
+        send_message(chat_id, get_text("voice_on_enabled_thread", ui_lang))
+    else:
+        update_user_setting(user_id, {"voice_enabled": True})
+        send_message(chat_id, get_text("voice_on_enabled", ui_lang))
+
+
+def handle_subscribe_command(
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+    if thread_id and not is_free_beta():
+        send_message(chat_id, get_text("telegram_subscribe_open_private", ui_lang))
+        return
+    subscription = get_user_subscription(user_id)
+    personal = personal_subscription_from_settings(user_id, subscription)
+    if personal.is_active():
+        send_message(
+            chat_id,
+            get_text(
+                "telegram_subscribe_active",
+                ui_lang,
+                plan=personal.plan_type or get_text("subscription_plan_unknown", ui_lang),
+                expires=format_subscription_expiry(personal.expires_at, ui_lang),
+            ),
+        )
+        return
+    if is_free_beta():
+        grant_free_voice_subscription(user_id)
+        send_message(chat_id, get_text("telegram_subscribe_free_beta", ui_lang))
+        return
+    message_key = (
+        "telegram_subscribe_expired" if personal.subscribed else "telegram_subscribe_how_to"
+    )
+    extra: Dict[str, Any] = {}
+    if message_key == "telegram_subscribe_how_to":
+        extra["stars"] = stars_amount()
+    if message_key == "telegram_subscribe_expired":
+        extra["expires"] = format_subscription_expiry(personal.expires_at, ui_lang)
+    _send_stars_invoice_link(chat_id, user_id, ui_lang, message_key, **extra)
+
+
+def handle_activate_group_command(
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+    user_subscription = get_user_subscription(user_id)
+    result = build_activate_group_updates(user_id, user_subscription, thread_id)
+    if result.ok and result.group_updates is not None and thread_id:
+        save_group_activation(thread_id, result.group_updates)
+    send_message(chat_id, get_text(result.message_key, ui_lang, **result.message_kwargs))
+
+
+def handle_terms_command(
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+    send_message(chat_id, get_text("terms_of_sale", ui_lang))
+
+
+def handle_paysupport_command(
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+    send_message(chat_id, get_text("payment_support", ui_lang))
+
+
+def handle_status_subscription_command(
+    chat_id: Union[int, str],
+    user_id: str,
+    thread_id: Optional[str] = None,
+    from_obj: Optional[Dict[str, Any]] = None,
+) -> None:
+    ui_lang = _resolve_ui_lang(user_id, thread_id, from_obj)
+    user_subscription = get_user_subscription(user_id)
+    group_subscription = get_group_activation(thread_id) if thread_id else None
+    status_lines = get_localized_subscription_status_lines(
+        user_settings=user_subscription,
+        lang=ui_lang,
+        user_id=user_id,
+        group_settings=group_subscription,
+        is_group=bool(thread_id),
+    )
+    send_message(chat_id, "\n".join(status_lines))
+
+
 def handle_status_command(
     chat_id: Union[int, str],
     thread_id: Optional[str] = None,
@@ -425,6 +738,11 @@ def handle_status_command(
         send_message(chat_id, "\n".join(help_lines))
         return
 
+    user_key = user_id if user_id is not None else (str(chat_id) if isinstance(chat_id, int) else chat_id)
+    subscription = get_user_subscription(user_key)
+    personal = personal_subscription_from_settings(user_key, subscription)
+    expiry = format_subscription_expiry(personal.expires_at, ui_lang) if (personal.subscribed or personal.is_active()) else None
+
     status_lines = get_localized_status_lines(
         enabled=bool(settings.get("enabled")),
         mode=settings.get("mode", "pair"),
@@ -433,6 +751,9 @@ def handle_status_command(
         lang=ui_lang,
         is_thread=bool(thread_id),
         ui_lang=settings.get("ui_lang"),
+        voice_enabled=bool(settings.get("voice_enabled")),
+        voice_gender=settings.get("voice_gender") or "female",
+        subscription_expires=expiry,
     )
     send_message(chat_id, "\n".join(status_lines))
 
@@ -482,6 +803,15 @@ def webhook():
         print(f"ERROR decoding webhook body: {e}")
         print(traceback.format_exc())
         return 'OK', 200  # Accept so Telegram does not retry
+    if "pre_checkout_query" in data:
+        try:
+            if BOT_TOKEN is None:
+                raise ValueError("BOT_TOKEN is not set.")
+            handle_pre_checkout_query(data["pre_checkout_query"], BOT_TOKEN)
+        except Exception as e:
+            print(f"ERROR handling pre_checkout_query: {e}")
+            print(traceback.format_exc())
+        return 'OK', 200
     if "message" not in data:
         return 'OK', 200
     message = data["message"]
@@ -493,6 +823,9 @@ def webhook():
     user_id = str(from_obj.get("id", ""))
     thread_id = str(chat_id) if chat.get("type") in ("group", "supergroup") else None
     try:
+        if message.get("successful_payment"):
+            handle_successful_payment(user_id, message["successful_payment"])
+            return 'OK', 200
         if "text" in message:
             text = message.get("text") or ""
             handle_text_message(chat_id, user_id, text, thread_id, from_obj)
@@ -525,10 +858,30 @@ def handle_text_message(
 
         cmd_info = parse_switch_command(message_text)
         if cmd_info:
-            if cmd_info["type"] in ["set_on", "set_off", "set_pair", "set_american", "set_mandarin", "set_japanese", "set_lang"]:
+            cmd_type = cmd_info["type"]
+            if cmd_type in [
+                "set_on",
+                "set_off",
+                "set_pair",
+                "set_american",
+                "set_mandarin",
+                "set_japanese",
+                "set_lang",
+                "set_voice",
+            ]:
                 handle_set_command(cmd_info, chat_id, user_id, thread_id, from_obj)
-            elif cmd_info["type"] in ["status", "help"]:
-                handle_status_command(chat_id, thread_id, cmd_info["type"], user_id=user_id, from_obj=from_obj)
+            elif cmd_type in ["status", "help"]:
+                handle_status_command(chat_id, thread_id, cmd_type, user_id=user_id, from_obj=from_obj)
+            elif cmd_type == "status_subscription":
+                handle_status_subscription_command(chat_id, user_id, thread_id, from_obj)
+            elif cmd_type == "subscribe":
+                handle_subscribe_command(chat_id, user_id, thread_id, from_obj)
+            elif cmd_type == "activate_group":
+                handle_activate_group_command(chat_id, user_id, thread_id, from_obj)
+            elif cmd_type == "terms":
+                handle_terms_command(chat_id, user_id, thread_id, from_obj)
+            elif cmd_type == "paysupport":
+                handle_paysupport_command(chat_id, user_id, thread_id, from_obj)
             return
         if is_emoji_only(message_text):
             return
@@ -550,6 +903,192 @@ def handle_text_message(
     except Exception as e:
         print(f"ERROR in handle_text_message: {e}")
         print(traceback.format_exc())
+
+
+def _transcribe_and_translate_voice(
+    audio_content: bytes,
+    settings: Dict[str, Any],
+    chat_id: Union[int, str],
+    ui_lang: str,
+    user_identifier: str,
+) -> Optional[str]:
+    """Google STT then Google Translate. Sends error replies; returns translated script or None."""
+    mode = settings.get("mode")
+    transcribed_text = None
+    recognition_errors: list[str] = []
+
+    if mode == "american":
+        primary_lang = AMERICAN_MODE_LANGUAGES[0]
+        alternative_langs = AMERICAN_MODE_LANGUAGES[1:5]
+        try:
+            transcribed_text = _telegram_speech_to_text(
+                audio_content, primary_lang, alternative_language_codes=alternative_langs
+            )
+        except Exception as e:
+            recognition_errors.append(str(e))
+        if not transcribed_text:
+            for group_start in range(5, len(AMERICAN_MODE_LANGUAGES), 5):
+                group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
+                if not group_languages:
+                    break
+                primary = group_languages[0]
+                alternatives = group_languages[1:5]
+                try:
+                    transcribed_text = _telegram_speech_to_text(
+                        audio_content, primary, alternative_language_codes=alternatives
+                    )
+                    if transcribed_text and transcribed_text.strip():
+                        break
+                except Exception as e:
+                    recognition_errors.append(str(e))
+        if not transcribed_text or not transcribed_text.strip():
+            send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
+            return None
+        try:
+            return detect_and_translate(
+                transcribed_text, enabled=True, source_lang=None, target_lang="en-US", mode="american"
+            )
+        except Exception:
+            send_message(
+                chat_id,
+                get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+            )
+            return None
+
+    if mode == "mandarin":
+        primary_lang = "zh-TW"
+        alternative_langs = [lang for lang in AMERICAN_MODE_LANGUAGES[:4] if lang != "zh-TW"][:4]
+        try:
+            transcribed_text = _telegram_speech_to_text(
+                audio_content, primary_lang, alternative_language_codes=alternative_langs
+            )
+        except Exception as e:
+            recognition_errors.append(str(e))
+        if not transcribed_text:
+            for group_start in range(0, len(AMERICAN_MODE_LANGUAGES), 5):
+                group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
+                if not group_languages or group_languages[0] == "zh-TW":
+                    continue
+                primary = group_languages[0]
+                alternatives = [lang for lang in group_languages[1:5] if lang != "zh-TW"][:4]
+                try:
+                    transcribed_text = _telegram_speech_to_text(
+                        audio_content, primary, alternative_language_codes=alternatives
+                    )
+                    if transcribed_text and transcribed_text.strip():
+                        break
+                except Exception as e:
+                    recognition_errors.append(str(e))
+        if not transcribed_text or not transcribed_text.strip():
+            send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
+            return None
+        try:
+            return detect_and_translate(
+                transcribed_text, enabled=True, source_lang=None, target_lang="zh-TW", mode="mandarin"
+            )
+        except Exception:
+            send_message(
+                chat_id,
+                get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+            )
+            return None
+
+    if mode == "japanese":
+        primary_lang = "ja-JP"
+        alternative_langs = [lang for lang in AMERICAN_MODE_LANGUAGES[:4] if lang != "ja-JP"][:4]
+        try:
+            transcribed_text = _telegram_speech_to_text(
+                audio_content, primary_lang, alternative_language_codes=alternative_langs
+            )
+        except Exception as e:
+            recognition_errors.append(str(e))
+        if not transcribed_text:
+            for group_start in range(0, len(AMERICAN_MODE_LANGUAGES), 5):
+                group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
+                if not group_languages or group_languages[0] == "ja-JP":
+                    continue
+                primary = group_languages[0]
+                alternatives = [lang for lang in group_languages[1:5] if lang != "ja-JP"][:4]
+                try:
+                    transcribed_text = _telegram_speech_to_text(
+                        audio_content, primary, alternative_language_codes=alternatives
+                    )
+                    if transcribed_text and transcribed_text.strip():
+                        break
+                except Exception as e:
+                    recognition_errors.append(str(e))
+        if not transcribed_text or not transcribed_text.strip():
+            send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
+            return None
+        try:
+            return detect_and_translate(
+                transcribed_text, enabled=True, source_lang=None, target_lang="ja", mode="japanese"
+            )
+        except Exception:
+            send_message(
+                chat_id,
+                get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+            )
+            return None
+
+    source_lang = settings.get("source_lang")
+    target_lang = settings.get("target_lang")
+    if not source_lang or not target_lang:
+        send_message(chat_id, get_text("voice_pair_misconfigured", ui_lang))
+        return None
+    stt_language_map = {
+        "en": "en-US", "zh-TW": "zh-TW", "zh-CN": "zh-CN", "es": "es-ES", "ja": "ja-JP",
+        "th": "th-TH", "id": "id-ID", "fil": "fil-PH",
+        "fr": "fr-FR", "it": "it-IT", "de": "de-DE", "ko": "ko-KR",
+        "vi": "vi-VN",
+    }
+    source_stt_code = stt_language_map.get(source_lang)
+    target_stt_code = stt_language_map.get(target_lang)
+    if not source_stt_code or not target_stt_code:
+        send_message(
+            chat_id,
+            get_text(
+                "voice_unsupported_languages",
+                ui_lang,
+                supported="en, zh-TW, zh-CN, es, ja, th, id, fil, fr, it, de, ko, vi",
+            ),
+        )
+        return None
+    detected_language = source_lang
+    try:
+        transcribed_text = _telegram_speech_to_text(
+            audio_content, source_stt_code, alternative_language_codes=[target_stt_code]
+        )
+        detected_language = source_lang
+    except Exception as e:
+        recognition_errors.append(str(e))
+        try:
+            transcribed_text = _telegram_speech_to_text(
+                audio_content, target_stt_code, alternative_language_codes=[source_stt_code]
+            )
+            detected_language = target_lang
+        except Exception as e2:
+            recognition_errors.append(str(e2))
+            send_message(chat_id, get_text("voice_could_not_recognize_pair", ui_lang))
+            return None
+    if not transcribed_text or not transcribed_text.strip():
+        send_message(chat_id, get_text("voice_could_not_transcribe", ui_lang))
+        return None
+    translation_target = target_lang if detected_language == source_lang else source_lang
+    try:
+        return detect_and_translate(
+            transcribed_text,
+            enabled=True,
+            source_lang=detected_language,
+            target_lang=translation_target,
+            mode="pair",
+        )
+    except Exception:
+        send_message(
+            chat_id,
+            get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+        )
+        return None
 
 
 def handle_voice_message(
@@ -605,159 +1144,46 @@ def handle_voice_message(
             send_message(chat_id, get_text("voice_could_not_download", ui_lang))
             return
 
-        mode = settings.get("mode")
-        transcribed_text = None
-        recognition_errors = []
-
-        if mode == "american":
-            primary_lang = AMERICAN_MODE_LANGUAGES[0]
-            alternative_langs = AMERICAN_MODE_LANGUAGES[1:5]
-            try:
-                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
-            except Exception as e:
-                recognition_errors.append(str(e))
-            if not transcribed_text:
-                for group_start in range(5, len(AMERICAN_MODE_LANGUAGES), 5):
-                    group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
-                    if not group_languages:
-                        break
-                    primary = group_languages[0]
-                    alternatives = group_languages[1:5]
-                    try:
-                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
-                        if transcribed_text and transcribed_text.strip():
-                            break
-                    except Exception as e:
-                        recognition_errors.append(str(e))
-            if not transcribed_text or not transcribed_text.strip():
-                send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
+        spoken = bool(settings.get("voice_enabled") and telegram_has_voice_access(user_id, thread_id))
+        if spoken:
+            if not ai_voice_rate_limiter.is_allowed(user_id):
+                send_message(chat_id, get_text("err_rate_limit_ai_voice", ui_lang))
                 return
+            if live_translate_enabled() and live_translate_supported_mode(settings.get("mode")):
+                send_chat_action(chat_id, "record_voice")
+                try:
+                    ogg_bytes, translated_text = live_translate_voice_note(
+                        audio_content, mode=settings.get("mode")
+                    )
+                    send_voice(chat_id, ogg_bytes, caption=f"{user_identifier}:\n{translated_text}")
+                    return
+                except (GeminiVoiceError, Exception) as e:
+                    print(f"WARNING: Live Translate failed, falling back to STT+TTS: {e}")
+                    print(traceback.format_exc())
+
+        translated_text = _transcribe_and_translate_voice(
+            audio_content, settings, chat_id, ui_lang, user_identifier
+        )
+        if not translated_text:
+            return
+
+        if spoken:
+            send_chat_action(chat_id, "record_voice")
             try:
-                translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=None, target_lang="en-US", mode="american")
-            except Exception as e:
-                send_message(
-                    chat_id,
-                    get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
+                ogg_bytes = speak_translation(
+                    translated_text,
+                    gender=settings.get("voice_gender") or "female",
+                    mode=settings.get("mode"),
+                    source_lang=settings.get("source_lang"),
+                    target_lang=settings.get("target_lang"),
                 )
-                return
-            send_message(chat_id, f"{user_identifier}:\n{translated_text}")
+                send_voice(chat_id, ogg_bytes, caption=f"{user_identifier}:\n{translated_text}")
+            except (GeminiVoiceError, Exception) as e:
+                print(f"ERROR spoken translation: {e}")
+                print(traceback.format_exc())
+                send_message(chat_id, get_text("voice_spoken_failed", ui_lang))
             return
 
-        if mode == "mandarin":
-            primary_lang = "zh-TW"
-            alternative_langs = [lang for lang in AMERICAN_MODE_LANGUAGES[:4] if lang != "zh-TW"][:4]
-            try:
-                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
-            except Exception as e:
-                recognition_errors.append(str(e))
-            if not transcribed_text:
-                for group_start in range(0, len(AMERICAN_MODE_LANGUAGES), 5):
-                    group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
-                    if not group_languages or group_languages[0] == "zh-TW":
-                        continue
-                    primary = group_languages[0]
-                    alternatives = [lang for lang in group_languages[1:5] if lang != "zh-TW"][:4]
-                    try:
-                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
-                        if transcribed_text and transcribed_text.strip():
-                            break
-                    except Exception as e:
-                        recognition_errors.append(str(e))
-            if not transcribed_text or not transcribed_text.strip():
-                send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
-                return
-            try:
-                translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=None, target_lang="zh-TW", mode="mandarin")
-            except Exception as e:
-                send_message(
-                    chat_id,
-                    get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
-                )
-                return
-            send_message(chat_id, f"{user_identifier}:\n{translated_text}")
-            return
-
-        if mode == "japanese":
-            primary_lang = "ja-JP"
-            alternative_langs = [lang for lang in AMERICAN_MODE_LANGUAGES[:4] if lang != "ja-JP"][:4]
-            try:
-                transcribed_text = speech_to_text(audio_content, primary_lang, alternative_language_codes=alternative_langs)
-            except Exception as e:
-                recognition_errors.append(str(e))
-            if not transcribed_text:
-                for group_start in range(0, len(AMERICAN_MODE_LANGUAGES), 5):
-                    group_languages = AMERICAN_MODE_LANGUAGES[group_start:group_start + 5]
-                    if not group_languages or group_languages[0] == "ja-JP":
-                        continue
-                    primary = group_languages[0]
-                    alternatives = [lang for lang in group_languages[1:5] if lang != "ja-JP"][:4]
-                    try:
-                        transcribed_text = speech_to_text(audio_content, primary, alternative_language_codes=alternatives)
-                        if transcribed_text and transcribed_text.strip():
-                            break
-                    except Exception as e:
-                        recognition_errors.append(str(e))
-            if not transcribed_text or not transcribed_text.strip():
-                send_message(chat_id, get_text("voice_could_not_recognize", ui_lang))
-                return
-            try:
-                translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=None, target_lang="ja", mode="japanese")
-            except Exception as e:
-                send_message(
-                    chat_id,
-                    get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
-                )
-                return
-            send_message(chat_id, f"{user_identifier}:\n{translated_text}")
-            return
-
-        source_lang = settings.get("source_lang")
-        target_lang = settings.get("target_lang")
-        if not source_lang or not target_lang:
-            send_message(chat_id, get_text("voice_pair_misconfigured", ui_lang))
-            return
-        stt_language_map = {
-            "en": "en-US", "zh-TW": "zh-TW", "es": "es-ES", "ja": "ja-JP",
-            "th": "th-TH", "id": "id-ID", "fil": "fil-PH",
-            "fr": "fr-FR", "it": "it-IT", "de": "de-DE", "ko": "ko-KR",
-            "vi": "vi-VN",
-        }
-        source_stt_code = stt_language_map.get(source_lang)
-        target_stt_code = stt_language_map.get(target_lang)
-        if not source_stt_code or not target_stt_code:
-            send_message(
-                chat_id,
-                get_text(
-                    "voice_unsupported_languages",
-                    ui_lang,
-                    supported="en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi",
-                ),
-            )
-            return
-        try:
-            transcribed_text = speech_to_text(audio_content, source_stt_code, alternative_language_codes=[target_stt_code])
-            detected_language = source_lang
-        except Exception as e:
-            recognition_errors.append(str(e))
-            try:
-                transcribed_text = speech_to_text(audio_content, target_stt_code, alternative_language_codes=[source_stt_code])
-                detected_language = target_lang
-            except Exception as e2:
-                recognition_errors.append(str(e2))
-                send_message(chat_id, get_text("voice_could_not_recognize_pair", ui_lang))
-                return
-        if not transcribed_text or not transcribed_text.strip():
-            send_message(chat_id, get_text("voice_could_not_transcribe", ui_lang))
-            return
-        translation_target = target_lang if detected_language == source_lang else source_lang
-        try:
-            translated_text = detect_and_translate(transcribed_text, enabled=True, source_lang=detected_language, target_lang=translation_target, mode="pair")
-        except Exception as e:
-            send_message(
-                chat_id,
-                get_text("voice_translation_failed_message", ui_lang, user=user_identifier, text=transcribed_text),
-            )
-            return
         send_message(chat_id, f"{user_identifier}:\n{translated_text}")
     except Exception as e:
         print(f"ERROR in handle_voice_message: {e}")

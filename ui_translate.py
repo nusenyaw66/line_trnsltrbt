@@ -26,7 +26,7 @@ _MASK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC"),
     re.compile(r"<-->"),
     re.compile(
-        r"\b(?:en-US|zh-TW|zh-tw|tw|en|ja|ko|th|id|fil|vi|fr|de|it|es)\b",
+        r"\b(?:en-US|zh-TW|zh-tw|zh-CN|zh-cn|tw|cn|en|ja|ko|th|id|fil|vi|fr|de|it|es)\b",
         re.IGNORECASE,
     ),
     re.compile(r"\b(?:pair|american|mandarin|japanese)\b"),

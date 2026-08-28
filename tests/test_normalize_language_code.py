@@ -12,11 +12,14 @@ from telegram_translator_bot import normalize_language_code as telegram_normaliz
     [
         ("zh-TW", "zh-TW"),
         ("zh-tw", "zh-TW"),
-        ("zh-cn", "zh-TW"),
-        ("zh-hans", "zh-TW"),
         ("zh-hant", "zh-TW"),
         ("tw", "zh-TW"),
         ("TW", "zh-TW"),
+        ("zh-cn", "zh-CN"),
+        ("zh-CN", "zh-CN"),
+        ("zh-hans", "zh-CN"),
+        ("cn", "zh-CN"),
+        ("zh", "zh-CN"),
         ("en", "en"),
         ("ja", "ja"),
     ],
@@ -25,5 +28,5 @@ from telegram_translator_bot import normalize_language_code as telegram_normaliz
     "normalize_fn",
     [line_normalize, telegram_normalize, messenger_normalize],
 )
-def test_normalize_language_code_accepts_tw_for_mandarin(raw, expected, normalize_fn):
+def test_normalize_language_code_accepts_chinese_variants(raw, expected, normalize_fn):
     assert normalize_fn(raw) == expected

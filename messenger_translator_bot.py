@@ -43,6 +43,7 @@ _COLLECTION_NAME = "user_settings"
 # These are used when mode is "american" to detect any language and translate to English
 AMERICAN_MODE_LANGUAGES = [
     "en-US",      # English (most common)
+    "zh-CN",      # Chinese (Simplified)
     "zh-TW",      # Chinese (Traditional)
     "es-ES",      # Spanish (Spain)
     "ja-JP",      # Japanese
@@ -420,7 +421,7 @@ def is_voice_translation_enabled(settings: Dict[str, Any]) -> bool:
         source_lang = settings.get("source_lang")
         target_lang = settings.get("target_lang")
         # Supported languages for voice translation
-        supported_languages = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
+        supported_languages = ["en", "zh-TW", "zh-CN", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         # Check if both languages are set and supported
         if source_lang and target_lang:
             if source_lang in supported_languages and target_lang in supported_languages:
@@ -500,7 +501,7 @@ def handle_set_command(cmd_info: Dict[str, Any], user_id: str, thread_id: Option
         target = normalize_language_code(target_input)
         
         # Supported Google Cloud language codes (proper format)
-        supported_codes = ["en", "zh-TW", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
+        supported_codes = ["en", "zh-TW", "zh-CN", "es", "ja", "th", "id", "fil", "fr", "it", "de", "ko", "vi"]
         
         # Validate language codes
         if source not in supported_codes:
@@ -577,10 +578,12 @@ def normalize_language_code(code: str) -> str:
     code_map = {
         "en": "en",
         "zh-tw": "zh-TW",
-        "zh-cn": "zh-TW",
-        "zh-hans": "zh-TW",
         "zh-hant": "zh-TW",
         "tw": "zh-TW",
+        "zh-cn": "zh-CN",
+        "zh-hans": "zh-CN",
+        "cn": "zh-CN",
+        "zh": "zh-CN",
         "es": "es",
         "ja": "ja",
         "jpn": "ja",  # Also accept jpn
@@ -641,9 +644,9 @@ def handle_status_command(user_id: str, thread_id: Optional[str] = None, status_
             "",
             "Language options for /set language pair <source> <target>",
             '"en": "en",',
-            '"zh-tw": "zh-TW",',
-            '"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)',
-            '"tw": "zh-TW",  # Also accept tw for Traditional Chinese (Taiwan)',
+            '"zh-tw": "zh-TW",  # Traditional Chinese, also accepts "tw"',
+            '"zh-cn": "zh-CN",  # Simplified Chinese, also accepts "cn"',
+            '"tw": "zh-TW",',
             '"es": "es",',
             '"ja": "ja",',
             '"jpn": "ja",  # Also accepts jpn',
@@ -967,14 +970,14 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
                     "/set mandarin\n\n"
                     "Or use Japanese mode:\n"
                     "/set japanese\n\n"
-                    "Supported languages for pair mode: en, zh-TW, es, ja, th, id, fil, vi, fr, it, de, ko"
+                    "Supported languages for pair mode: en, zh-TW, zh-CN, es, ja, th, id, fil, vi, fr, it, de, ko"
                 )
             else:
                 send_message(
                     user_id,
                     f"Voice translation is not enabled or language pair ({source_lang} → {target_lang}) is not supported.\n"
                     "Please ensure translation is enabled and both languages are supported.\n\n"
-                    "Supported languages: en, zh-TW, es, ja, th, id, fil, vi, fr, it, de, ko\n"
+                    "Supported languages: en, zh-TW, zh-CN, es, ja, th, id, fil, vi, fr, it, de, ko\n"
                     "Or use American mode: /set american\n"
                     "Or use Mandarin mode: /set mandarin\n"
                     "Or use Japanese mode: /set japanese"
@@ -1339,6 +1342,7 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
         stt_language_map = {
             "en": "en-US",
             "zh-TW": "zh-TW",
+            "zh-CN": "zh-CN",
             "es": "es-ES",  # Spanish (Spain), can also use es-MX for Mexico
             "ja": "ja-JP",
             "th": "th-TH",
@@ -1365,7 +1369,7 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
             send_message(
                 user_id,
                 f"Error: Unsupported language(s) for voice translation: {', '.join(unsupported)}\n"
-                "Supported languages: en, zh-TW, es, ja, th, id, fil, fr, it, de, ko, vi"
+                "Supported languages: en, zh-TW, zh-CN, es, ja, th, id, fil, fr, it, de, ko, vi"
             )
             return
         
@@ -1410,6 +1414,7 @@ def handle_audio_message(user_id: str, attachment: Dict[str, Any], thread_id: Op
             lang_names = {
                 "en": "English",
                 "zh-TW": "Traditional Chinese",
+                "zh-CN": "Simplified Chinese",
                 "es": "Spanish",
                 "ja": "Japanese",
                 "th": "Thai",

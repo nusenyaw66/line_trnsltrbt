@@ -142,9 +142,14 @@ def detect_and_translate(
             # Helper function to check if detected language matches a given language code
             def matches_lang(detected: str, lang_code: str) -> bool:
                 """Check if detected language matches the given language code."""
-                if lang_code == "zh-TW":
-                    # Handle Chinese variants
-                    return detected in {"zh", "zh-CN", "zh-TW"}
+                if lang_code in ("zh-CN", "zh-TW"):
+                    both_chinese = source_lang in ("zh-CN", "zh-TW") and target_lang in ("zh-CN", "zh-TW")
+                    if both_chinese:
+                        # Distinguish scripts when translating Simplified ↔ Traditional.
+                        if lang_code == "zh-TW":
+                            return detected in {"zh-TW", "zh-Hant"}
+                        return detected in {"zh", "zh-CN", "zh-Hans"}
+                    return detected in {"zh", "zh-CN", "zh-TW", "zh-Hans", "zh-Hant"}
                 if lang_code == "fil":
                     # Handle Filipino/Tagalog variants
                     return detected in {"fil", "tl"}

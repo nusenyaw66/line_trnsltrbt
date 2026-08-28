@@ -5,7 +5,7 @@
 set -e
 
 # Flag for API, Service Account, Secrets update - false to skip update
-gcs_update=false
+gcs_update=true
 
 # Load .env file first (for TELEGRAM_* variables, APP_VERSION, etc.)
 if [ -f .env ]; then
@@ -30,6 +30,8 @@ REPOSITORY_NAME="line-trnsltrbt"
 SERVICE_ACCOUNT="${SERVICE_ACCOUNT:-${TELEGRAM_SERVICE_ACCOUNT:-user-704@line-trnsltrbt.iam.gserviceaccount.com}}"
 SECRET_BOT_TOKEN="${SECRET_BOT_TOKEN:-${TELEGRAM_SECRET_BOT_TOKEN:-telegram-bot-token}}"
 SECRET_WEBHOOK_SECRET="${SECRET_WEBHOOK_SECRET:-telegram-webhook-secret}"
+SECRET_XAI_API_KEY="${SECRET_XAI_API_KEY:-xai-api-key}"
+SECRET_GEMINI_API_KEY="${SECRET_GEMINI_API_KEY:-gemini-api-key}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -64,7 +66,7 @@ if [ "$gcs_update" = true ]; then
 
     # Set application-default quota project
     echo -e "${GREEN}Setting application-default quota project to $PROJECT_ID...${NC}"
-    gcloud auth application-default set-quota-project "$PROJECT_ID"
+    gcloud auth application-default set-quota-project "$PROJECT_ID" 2>/dev/null || true
 
     # Enable required APIs
     echo -e "${GREEN}Enabling required APIs...${NC}"
@@ -177,8 +179,30 @@ if [ "$gcs_update" = true ]; then
             fi
         fi
 
+        # GEMINI_API_KEY for Live Translate (direct Gemini API, not REST proxy)
+        if [ -n "$GEMINI_API_KEY" ]; then
+            if gcloud secrets describe "$SECRET_GEMINI_API_KEY" --project="$PROJECT_ID" &>/dev/null; then
+                echo -e "${GREEN}Updating secret: $SECRET_GEMINI_API_KEY${NC}"
+                echo -n "$GEMINI_API_KEY" | gcloud secrets versions add "$SECRET_GEMINI_API_KEY" --data-file=- --project="$PROJECT_ID"
+            else
+                echo -e "${GREEN}Creating secret: $SECRET_GEMINI_API_KEY${NC}"
+                echo -n "$GEMINI_API_KEY" | gcloud secrets create "$SECRET_GEMINI_API_KEY" --data-file=- --project="$PROJECT_ID"
+            fi
+        fi
+
+        # XAI_API_KEY from .env (Grok TTS speak hop / Live Translate fallback)
+        if [ -n "$XAI_API_KEY" ]; then
+            if gcloud secrets describe "$SECRET_XAI_API_KEY" --project="$PROJECT_ID" &>/dev/null; then
+                echo -e "${GREEN}Updating secret: $SECRET_XAI_API_KEY${NC}"
+                echo -n "$XAI_API_KEY" | gcloud secrets versions add "$SECRET_XAI_API_KEY" --data-file=- --project="$PROJECT_ID"
+            else
+                echo -e "${GREEN}Creating secret: $SECRET_XAI_API_KEY${NC}"
+                echo -n "$XAI_API_KEY" | gcloud secrets create "$SECRET_XAI_API_KEY" --data-file=- --project="$PROJECT_ID"
+            fi
+        fi
+
         # Grant service account access to secrets
-        for secret in "$SECRET_BOT_TOKEN" "$SECRET_WEBHOOK_SECRET"; do
+        for secret in "$SECRET_BOT_TOKEN" "$SECRET_WEBHOOK_SECRET" "$SECRET_XAI_API_KEY" "$SECRET_GEMINI_API_KEY"; do
             if gcloud secrets describe "$secret" --project="$PROJECT_ID" &>/dev/null; then
                 gcloud secrets add-iam-policy-binding "$secret" \
                     --member="serviceAccount:${SERVICE_ACCOUNT_EMAIL}" \
@@ -197,7 +221,7 @@ else
     echo -e "${GREEN}Setting GCP project to $PROJECT_ID...${NC}"
     gcloud config set project "$PROJECT_ID"
     echo -e "${GREEN}Setting application-default quota project to $PROJECT_ID...${NC}"
-    gcloud auth application-default set-quota-project "$PROJECT_ID"
+    gcloud auth application-default set-quota-project "$PROJECT_ID" 2>/dev/null || true
 fi
 
 # Verify required secret exists before deployment
@@ -212,6 +236,8 @@ echo -e "${GREEN}All required secrets exist.${NC}"
 # Build and deploy
 echo -e "${GREEN}Building and deploying to Cloud Run...${NC}"
 TAG="${APP_VERSION:-unknown}"
+CLOUDBUILD_SA="${SERVICE_ACCOUNT}"
+CLOUDBUILD_SA_FULL="projects/${PROJECT_ID}/serviceAccounts/${CLOUDBUILD_SA}"
 
 # Pass webhook secret name if it exists (TELEGRAM_WEBHOOK_SECRET from .env)
 WEBHOOK_SECRET_ARG=""
@@ -219,11 +245,35 @@ if gcloud secrets describe "$SECRET_WEBHOOK_SECRET" --project="$PROJECT_ID" &>/d
     WEBHOOK_SECRET_ARG="_TELEGRAM_WEBHOOK_SECRET_NAME=$SECRET_WEBHOOK_SECRET"
 fi
 
+XAI_SECRET_ARG=""
+if gcloud secrets describe "$SECRET_XAI_API_KEY" --project="$PROJECT_ID" &>/dev/null; then
+    XAI_SECRET_ARG="_XAI_API_KEY_SECRET=$SECRET_XAI_API_KEY"
+fi
+
+GEMINI_SECRET_ARG=""
+if gcloud secrets describe "$SECRET_GEMINI_API_KEY" --project="$PROJECT_ID" &>/dev/null; then
+    GEMINI_SECRET_ARG="_GEMINI_API_KEY_SECRET=$SECRET_GEMINI_API_KEY"
+fi
+
+STARS_ARG="_TELEGRAM_VOICE_SUB_STARS=${TELEGRAM_VOICE_SUB_STARS:-0}"
+LIVE_TRANSLATE_ARG="_GEMINI_LIVE_TRANSLATE=${GEMINI_LIVE_TRANSLATE:-0}"
+
 echo -e "${GREEN}Submitting Cloud Build with service account: ${CLOUDBUILD_SA}${NC}"
+SUBSTITUTIONS="_REGION=$REGION,_SERVICE=$SERVICE_NAME,_TAG=$TAG,_SERVICE_ACCOUNT=$SERVICE_ACCOUNT,_APP_VERSION=${APP_VERSION:-unknown},_TELEGRAM_BOT_TOKEN_SECRET=$SECRET_BOT_TOKEN,$STARS_ARG"
+if [ -n "$WEBHOOK_SECRET_ARG" ]; then
+    SUBSTITUTIONS="${SUBSTITUTIONS},${WEBHOOK_SECRET_ARG}"
+fi
+if [ -n "$XAI_SECRET_ARG" ]; then
+    SUBSTITUTIONS="${SUBSTITUTIONS},${XAI_SECRET_ARG}"
+fi
+if [ -n "$GEMINI_SECRET_ARG" ]; then
+    SUBSTITUTIONS="${SUBSTITUTIONS},${GEMINI_SECRET_ARG}"
+fi
+SUBSTITUTIONS="${SUBSTITUTIONS},${LIVE_TRANSLATE_ARG}"
 gcloud builds submit \
     --config=cloudbuild-telegram.yaml \
     --service-account="${CLOUDBUILD_SA_FULL}" \
-    --substitutions=_REGION="$REGION",_SERVICE="$SERVICE_NAME",_TAG="$TAG",_SERVICE_ACCOUNT="$SERVICE_ACCOUNT",_APP_VERSION="${APP_VERSION:-unknown}",_TELEGRAM_BOT_TOKEN_SECRET="$SECRET_BOT_TOKEN"${WEBHOOK_SECRET_ARG:+,$WEBHOOK_SECRET_ARG} \
+    --substitutions="$SUBSTITUTIONS" \
     --project="$PROJECT_ID"
 
 echo -e "${GREEN}=== Deployment Complete ===${NC}"

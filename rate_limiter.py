@@ -95,5 +95,8 @@ text_rate_limiter = RateLimiter(max_requests=60, window_seconds=60)
 # Voice messages: 10 per minute per user (more expensive)
 voice_rate_limiter = RateLimiter(max_requests=10, window_seconds=60)
 
+# Gemini spoken replies: tighter cap on top of the general voice limiter
+ai_voice_rate_limiter = RateLimiter(max_requests=6, window_seconds=60)
+
 # Global API rate limiter: 1000 per minute across all users
 global_rate_limiter = RateLimiter(max_requests=1000, window_seconds=60)

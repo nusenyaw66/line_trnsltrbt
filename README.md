@@ -5,16 +5,18 @@ Command Parsing:
 Commands start with /
 /on translate - enables translation for user
 /off translate - disables translation for user
-/set language pair <source> <target> - sets specific language pair (e.g., /set language pair tc eng)
+/set language pair   - sets specific language pair (e.g., /set language pair tc eng)
 /set american - sets mode to translate all languages to American English
 /status - returns current user settings
 /status version
 /status help
 
-Langage options for /set language pair <source> <target>
+Langage options for /set language pair  
 "en": "en",
 "zh-tw": "zh-TW",
-"zh-cn": "zh-TW",  # Map zh-cn to zh-TW (we only support Traditional Chinese)
+"zh-cn": "zh-CN",
+"tw": "zh-TW",  # Traditional Chinese (Taiwan)
+"cn": "zh-CN",  # Simplified Chinese
 "es": "es",
 "ja": "ja",
 "jpn": "ja",  # Also accept jpn
@@ -57,3 +59,11 @@ v0.9 Added Filipino (Tagalog) support to the translation bot.
 v0.22 added French, Italian, Germany and pre-production update.
 
 v0.39 added Vietnamese
+
+v0.46 added Simpfied Chinese - zh-CN
+
+v0.50 added v2v AI translation. 0 Star druing beta
+
+v0.54 spoken replies use Grok TTS (eve/rex) instead of Gemini TTS; Gemini still understands the voice note
+
+v0.55 spoken replies are Google STT + Google Translate + Grok TTS (no Gemini audio-in)

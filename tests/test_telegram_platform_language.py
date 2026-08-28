@@ -39,6 +39,19 @@ def test_resolve_ui_lang_uses_telegram_language_when_no_stored_pref(monkeypatch)
     assert ui == "ja"
 
 
+def test_resolve_ui_lang_maps_telegram_simplified_chinese(monkeypatch):
+    from telegram_translator_bot import _resolve_ui_lang
+
+    def fake_get_user_setting(user_id: str):
+        return {"enabled": False, "mode": "pair", "source_lang": None, "target_lang": None, "ui_lang": None}
+
+    monkeypatch.setattr("telegram_translator_bot.get_user_setting", fake_get_user_setting)
+    monkeypatch.setattr("telegram_translator_bot.get_thread_setting", fake_get_user_setting)
+
+    ui = _resolve_ui_lang("user-1", from_obj={"language_code": "zh-hans"})
+    assert ui == "zh-CN"
+
+
 def test_resolve_ui_lang_stored_ui_lang_beats_telegram_client(monkeypatch):
     from telegram_translator_bot import _resolve_ui_lang
 
